@@ -1,0 +1,13 @@
+[package]
+name = "terminal-workspace"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+
+[[bin]]
+name = "tw"
+path = "src/main.rs"
+
+[dependencies]
+console = "=0.15.7"
+libc = "=0.2.167"
