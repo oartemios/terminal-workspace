@@ -122,13 +122,13 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
         open_ms = session.last_event_ms
         session.send(b"fp", b"nested terminal preview")
         session.send(b"\x1b", b"> Items")
-        session.send(b"\x7f", b"\x1b[7m> notes with spaces/")
+        session.send(b"\x7f", "\x1b[7m> ▸ notes with spaces/".encode())
         parent_ms = session.last_event_ms
         session.send(b"fo", b"| /notes with spaces/ |")
-        session.send(b":files.parent\r", b"\x1b[7m> notes with spaces/")
+        session.send(b":files.parent\r", "\x1b[7m> ▸ notes with spaces/".encode())
         session.send(b":files.open notes with spaces/empty\r", b"No entries")
-        session.send(b"\x7f", b"\x1b[7m> empty/")
-        session.send(b"\x7f", b"\x1b[7m> notes with spaces/")
+        session.send(b"\x7f", "\x1b[7m> ▸ empty/".encode())
+        session.send(b"\x7f", "\x1b[7m> ▸ notes with spaces/".encode())
         session.resize(20, 6)
         session.wait_for(b"Terminal too small")
         session.resize(80, 24)
@@ -138,7 +138,7 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
         session.send(b"\x1b", b"> Items")
         session.send("/заметка\r".encode(), "filter: заметка".encode())
         wide_output = session.send(b"fp", b"preview through the real terminal")
-        assert "> заметка.md".encode() in wide_output
+        assert "> ▤ заметка.md".encode() in wide_output
         session.send(b"\x1b", b"> Items")
         session.send(b"a", b"Actions |")
         session.send(b"\x1b", b"> Items")

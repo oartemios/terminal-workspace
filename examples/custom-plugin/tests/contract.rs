@@ -42,6 +42,6 @@ fn same_custom_plugin_uses_two_workspace_contexts() {
         assert!(strip_ansi_codes(&ui.render(120, 24)).contains("Welcome to"));
         ui.handle(Key::Escape);
         ui.handle(Key::Backspace);
-        assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> Introduction section"));
+        assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> • Introduction section"));
     }
 }

@@ -93,6 +93,14 @@ impl Plugin for FilesPlugin {
         })
     }
 
+    fn item_icon(&self, item: &Item) -> char {
+        if item.kind == "directory" {
+            '▸'
+        } else {
+            '▤'
+        }
+    }
+
     fn actions(&self, item: &Item) -> Vec<Action> {
         if item.kind == "directory" {
             return vec![

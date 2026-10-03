@@ -2,6 +2,7 @@ use console::{measure_text_width, strip_ansi_codes, Key};
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use terminal_workspace::{
     files::FilesPlugin, ui::Ui, Action, App, Block, Command, CommandInvocation, CommandOutcome,
     Group, Item, Permission, Plugin, Workspace,
@@ -74,12 +75,12 @@ fn split_layout_keeps_items_visible_and_bounds_untrusted_output() {
         assert!(plain.lines().all(|line| measure_text_width(line) < width));
         assert!(plain.contains("preview in the right pane"));
         if width >= 90 {
-            assert!(plain.contains("> заметка.md"));
+            assert!(plain.contains("> ▤ заметка.md"));
             assert!(plain.contains('│'));
         }
     }
     ui.handle(Key::Escape);
-    assert!(frame(&ui).contains("> заметка.md"));
+    assert!(frame(&ui).contains("> ▤ заметка.md"));
 }
 
 #[test]
@@ -116,15 +117,15 @@ fn rich_list_paging_uses_complete_rows_and_output_names_its_actual_target() {
     let mut ui = fixture.ui();
     ui.resize_to(120, 24);
     ui.handle(Key::PageDown);
-    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> file-02.txt"));
+    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> ▤ file-06.txt"));
     ui.handle(Key::End);
-    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> file-39.txt"));
+    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> ▤ file-39.txt"));
     ui.handle(Key::Char(':'));
     type_text(&mut ui, "files.preview file-00.txt");
     ui.handle(Key::Enter);
     let rendered = strip_ansi_codes(&ui.render(120, 24)).into_owned();
     assert!(rendered.contains("file-00.txt"));
-    assert!(rendered.contains("> file-39.txt"));
+    assert!(rendered.contains("> ▤ file-39.txt"));
     assert!(rendered.contains("1  actual target"));
 }
 
@@ -249,16 +250,93 @@ fn long_list_and_output_scroll_keep_the_selection_visible() {
     let mut ui = fixture.ui();
     ui.resize(10);
     ui.handle(Key::End);
-    assert!(strip_ansi_codes(&ui.render(60, 10)).contains("> file-49.txt"));
+    assert!(strip_ansi_codes(&ui.render(60, 10)).contains("> ▤ file-49.txt"));
     type_text(&mut ui, "fp");
     ui.handle(Key::End);
     let output = strip_ansi_codes(&ui.render(60, 10)).into_owned();
     assert!(output.contains("line 49"));
     ui.handle(Key::Escape);
-    assert!(strip_ansi_codes(&ui.render(60, 10)).contains("> file-49.txt"));
+    assert!(strip_ansi_codes(&ui.render(60, 10)).contains("> ▤ file-49.txt"));
 }
 
 struct StatusPlugin;
+
+struct IconPlugin {
+    icon: Option<char>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Plugin for IconPlugin {
+    fn id(&self) -> &'static str {
+        "icons"
+    }
+    fn name(&self) -> &'static str {
+        "Icons"
+    }
+    fn groups(&self) -> Vec<Group> {
+        StatusPlugin.groups()
+    }
+    fn items(&self, _: &Workspace, _: &str) -> Result<Vec<Item>, String> {
+        Ok(vec![Item {
+            id: "native-id".into(),
+            title: "Native object".into(),
+            kind: "custom-kind".into(),
+        }])
+    }
+    fn item_icon(&self, _: &Item) -> char {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.icon.expect("Failed icon provider")
+    }
+    fn actions(&self, _: &Item) -> Vec<Action> {
+        Vec::new()
+    }
+    fn commands(&self) -> Vec<Command> {
+        Vec::new()
+    }
+    fn execute(&self, _: &Workspace, _: &CommandInvocation) -> Result<CommandOutcome, String> {
+        Err("No commands".into())
+    }
+}
+
+#[test]
+fn plugin_icons_are_bounded_and_cached_without_changing_native_items() {
+    let fixture = Fixture::new();
+    for (icon, expected) in [
+        (Some('◆'), '◆'),
+        (Some('界'), '•'),
+        (Some('\u{0301}'), '•'),
+        (Some('\x1b'), '•'),
+        (Some('\n'), '•'),
+        (None, '•'),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut app = App::new(fixture.0.clone()).unwrap();
+        app.install(
+            Box::new(IconPlugin {
+                icon,
+                calls: calls.clone(),
+            }),
+            true,
+        )
+        .unwrap();
+        let mut ui = Ui::new(app);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        for (width, height) in [(60, 10), (90, 16), (120, 24)] {
+            ui.resize_to(width, height);
+            let rendered = strip_ansi_codes(&ui.render(width, height)).into_owned();
+            assert!(rendered.contains(&format!("> {expected} Native object")));
+            assert!(rendered
+                .lines()
+                .all(|line| measure_text_width(line) < width));
+        }
+        assert!(frame(&ui).contains("custom-kind"));
+        // Painting and selection must never call plugin code.
+        ui.handle(Key::ArrowDown);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        ui.handle(Key::Char('r'));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+}
 
 impl Plugin for StatusPlugin {
     fn id(&self) -> &'static str {
@@ -363,7 +441,7 @@ fn directory_commands_share_navigation_and_restore_parent_selection() {
             "route {route}: {}",
             frame(&ui)
         );
-        assert!(frame(&ui).contains("> заметка.md"));
+        assert!(frame(&ui).contains("> ▤ заметка.md"));
         type_text(&mut ui, "fp");
         assert!(frame(&ui).contains("nested preview"));
         ui.handle(Key::Escape);
@@ -387,7 +465,7 @@ fn directory_commands_share_navigation_and_restore_parent_selection() {
             }
         }
         assert!(frame(&ui).contains("| / |"));
-        assert!(frame(&ui).contains("> notes/"));
+        assert!(frame(&ui).contains("> ▸ notes/"));
         assert!(frame(&ui).contains("filter: notes"));
         // A parent operation at root stays inside the workspace.
         type_text(&mut ui, "fu");
@@ -408,16 +486,16 @@ fn revisiting_nested_directories_restores_filter_and_selection() {
     ui.handle(Key::Backspace);
     ui.handle(Key::Enter);
     assert!(frame(&ui).contains("filter: z.md"));
-    assert!(frame(&ui).contains("> z.md"));
+    assert!(frame(&ui).contains("> ▤ z.md"));
     ui.handle(Key::Escape);
     select(&mut ui, "chapter");
     ui.handle(Key::Enter);
     assert!(frame(&ui).contains("No entries"));
     assert!(frame(&ui).contains("| /notes/chapter/ |"));
     ui.handle(Key::Backspace);
-    assert!(frame(&ui).contains("> chapter/"));
+    assert!(frame(&ui).contains("> ▸ chapter/"));
     ui.handle(Key::Backspace);
-    assert!(frame(&ui).contains("> notes/"));
+    assert!(frame(&ui).contains("> ▸ notes/"));
 }
 
 #[test]
@@ -447,7 +525,7 @@ fn internal_symlink_returns_logically_and_external_symlink_is_rejected() {
     ui.handle(Key::Enter);
     assert!(frame(&ui).contains("| /alias/ |"));
     ui.handle(Key::Backspace);
-    assert!(frame(&ui).contains("> alias/"));
+    assert!(frame(&ui).contains("> ▸ alias/"));
     for command in ["files.open external", "files.open ../", "files.parent ../"] {
         ui.handle(Key::Char(':'));
         type_text(&mut ui, command);

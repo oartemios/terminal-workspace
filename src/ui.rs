@@ -95,6 +95,7 @@ pub struct Ui {
     groups: Vec<Group>,
     group: usize,
     items: Vec<Item>,
+    item_icons: BTreeMap<String, char>,
     location: Option<String>,
     view_title: String,
     parent: Option<CommandInvocation>,
@@ -124,6 +125,7 @@ impl Ui {
             groups: Vec::new(),
             group: 0,
             items: Vec::new(),
+            item_icons: BTreeMap::new(),
             location: None,
             view_title: String::new(),
             parent: None,
@@ -152,11 +154,7 @@ impl Ui {
 
     pub fn resize_to(&mut self, width: usize, height: usize) {
         self.page_size = viewport_rows(width, height);
-        self.list_page_size = if width >= 90 && height >= 24 {
-            (self.page_size / 3).max(1)
-        } else {
-            self.page_size
-        };
+        self.list_page_size = self.page_size;
     }
 
     fn plugin_id(&self) -> Option<&str> {
@@ -181,6 +179,14 @@ impl Ui {
         items
     }
 
+    fn item_label(&self, item: &Item) -> String {
+        format!(
+            "{} {}",
+            self.item_icons.get(&item.id).unwrap_or(&'•'),
+            item.title
+        )
+    }
+
     fn selected_item(&self) -> Option<String> {
         self.visible_items()
             .get(self.selected)
@@ -191,6 +197,7 @@ impl Ui {
         self.group = 0;
         self.groups.clear();
         self.items.clear();
+        self.item_icons.clear();
         self.location = None;
         self.view_title.clear();
         self.parent = None;
@@ -216,6 +223,7 @@ impl Ui {
                 }
                 Err(error) => {
                     self.items.clear();
+                    self.item_icons.clear();
                     self.selected = 0;
                     self.message = error;
                 }
@@ -224,6 +232,17 @@ impl Ui {
     }
 
     fn apply_view(&mut self, view: GroupView, selected: Option<String>) {
+        self.item_icons = view
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.id.clone(),
+                    self.app
+                        .item_icon(self.plugin_id().unwrap_or_default(), item),
+                )
+            })
+            .collect();
         self.items = view.items;
         self.location = Some(view.location);
         self.view_title = view.title;
@@ -732,7 +751,7 @@ impl Ui {
                         ),
                         items
                             .iter()
-                            .map(|item| item.title.clone())
+                            .map(|item| self.item_label(item))
                             .collect::<Vec<_>>(),
                         Some(self.selected),
                     )
@@ -850,11 +869,7 @@ impl Ui {
         let left = (width * 44 / 100).max(32);
         let right = width - left - 1;
         let body_height = viewport_rows(width + 1, height);
-        let list_height = if rich {
-            (body_height / 3).max(1)
-        } else {
-            body_height
-        };
+        let list_height = body_height;
         let items = self.visible_items();
         let start = self.selected.saturating_sub(list_height - 1);
         let selected = items.get(self.selected);
@@ -1046,23 +1061,20 @@ impl Ui {
         }
         let content_start = selection.map_or(0, |index| index.saturating_sub(body_height - 1));
         for row in 0..body_height {
-            let index = start + if rich { row / 3 } else { row };
+            let index = start + row;
             let item_text = items
                 .get(index)
-                .filter(|_| !rich || row / 3 < list_height)
                 .map(|item| {
-                    if !rich {
-                        return format!("{} {}", focus_marker(index == self.selected), item.title);
-                    }
-                    match row % 3 {
-                        0 => format!(
+                    let label = self.item_label(item);
+                    if rich {
+                        format!(
                             " {:02} {} {}",
                             index + 1,
                             focus_marker(index == self.selected),
-                            item.title
-                        ),
-                        1 => format!("       {}", item.kind),
-                        _ => "─".repeat(left - 2),
+                            label
+                        )
+                    } else {
+                        format!("{} {}", focus_marker(index == self.selected), label)
                     }
                 })
                 .unwrap_or_else(|| {
@@ -1090,12 +1102,8 @@ impl Ui {
                 &panel_cell(
                     &item_text,
                     left,
-                    if index == self.selected && !items.is_empty() && (!rich || row % 3 != 2) {
+                    if index == self.selected && !items.is_empty() {
                         SELECTED
-                    } else if rich && row % 3 == 2 {
-                        BORDER
-                    } else if rich && row % 3 == 1 {
-                        MUTED
                     } else {
                         TEXT
                     },

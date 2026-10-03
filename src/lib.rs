@@ -132,6 +132,10 @@ pub trait Plugin {
             command_defaults: Vec::new(),
         })
     }
+    /// A single terminal cell identifying the native item kind; Core uses a dot fallback.
+    fn item_icon(&self, _item: &Item) -> char {
+        '•'
+    }
     fn actions(&self, item: &Item) -> Vec<Action>;
     fn commands(&self) -> Vec<Command>;
     fn execute(
@@ -315,6 +319,16 @@ impl App {
             .ok_or_else(|| format!("Item not found: {item_id}"))?;
         catch_unwind(AssertUnwindSafe(|| plugin.actions(&item)))
             .map_err(|_| format!("Plugin {id} failed while listing actions"))
+    }
+
+    pub fn item_icon(&self, id: &str, item: &Item) -> char {
+        self.active(id)
+            .ok()
+            .and_then(|plugin| catch_unwind(AssertUnwindSafe(|| plugin.item_icon(item))).ok())
+            .filter(|icon| {
+                !icon.is_control() && console::measure_text_width(&icon.to_string()) == 1
+            })
+            .unwrap_or('•')
     }
 
     pub fn commands(&self) -> Vec<&Command> {
