@@ -46,6 +46,88 @@ fn frame(ui: &Ui) -> String {
     strip_ansi_codes(&ui.render(100, 24)).into_owned()
 }
 
+#[test]
+fn split_layout_keeps_items_visible_and_bounds_untrusted_output() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("заметка.md"),
+        format!("preview in the right pane\n\x1b[2J\x07{}", "界".repeat(150)),
+    )
+    .unwrap();
+    let mut ui = fixture.ui();
+    select(&mut ui, "заметка.md");
+    type_text(&mut ui, "fp");
+    for (width, height) in [
+        (90, 16),
+        (90, 24),
+        (100, 25),
+        (120, 32),
+        (180, 45),
+        (60, 10),
+    ] {
+        ui.resize_to(width, height);
+        let rendered = ui.render(width, height);
+        assert!(!rendered.contains("\x1b[2J"));
+        assert!(!rendered.contains('\x07'));
+        let plain = strip_ansi_codes(&rendered);
+        assert_eq!(plain.lines().count(), height);
+        assert!(plain.lines().all(|line| measure_text_width(line) < width));
+        assert!(plain.contains("preview in the right pane"));
+        if width >= 90 {
+            assert!(plain.contains("> заметка.md"));
+            assert!(plain.contains('│'));
+        }
+    }
+    ui.handle(Key::Escape);
+    assert!(frame(&ui).contains("> заметка.md"));
+}
+
+#[test]
+fn split_output_scrolls_to_the_final_line_after_resize() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("long.txt"),
+        (1..=60).fold(String::new(), |mut text, i| {
+            writeln!(text, "line {i}").unwrap();
+            text
+        }),
+    )
+    .unwrap();
+    let mut ui = fixture.ui();
+    ui.resize_to(120, 24);
+    type_text(&mut ui, "fp");
+    ui.handle(Key::End);
+    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("line 60"));
+    ui.resize_to(90, 16);
+    ui.handle(Key::End);
+    assert!(strip_ansi_codes(&ui.render(90, 16)).contains("line 60"));
+}
+
+#[test]
+fn rich_list_paging_uses_complete_rows_and_output_names_its_actual_target() {
+    let fixture = Fixture::new();
+    for index in 0..40 {
+        std::fs::write(
+            fixture.0.join(format!("file-{index:02}.txt")),
+            "actual target",
+        )
+        .unwrap();
+    }
+    let mut ui = fixture.ui();
+    ui.resize_to(120, 24);
+    ui.handle(Key::PageDown);
+    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> file-02.txt"));
+    ui.handle(Key::End);
+    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("> file-39.txt"));
+    ui.handle(Key::Char(':'));
+    type_text(&mut ui, "files.preview file-00.txt");
+    ui.handle(Key::Enter);
+    let rendered = strip_ansi_codes(&ui.render(120, 24)).into_owned();
+    assert!(rendered.contains("file-00.txt"));
+    assert!(rendered.contains("> file-39.txt"));
+    assert!(rendered.contains("1  actual target"));
+}
+
 fn select(ui: &mut Ui, name: &str) {
     ui.handle(Key::Char('/'));
     type_text(ui, name);

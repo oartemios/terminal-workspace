@@ -109,6 +109,8 @@ pub struct Ui {
     pending: Option<char>,
     message: String,
     page_size: usize,
+    list_page_size: usize,
+    output_item: Option<String>,
 }
 
 impl Ui {
@@ -136,6 +138,8 @@ impl Ui {
             pending: None,
             message: String::new(),
             page_size: 18,
+            list_page_size: 18,
+            output_item: None,
         };
         ui.load_groups();
         ui
@@ -143,6 +147,16 @@ impl Ui {
 
     pub fn resize(&mut self, height: usize) {
         self.page_size = height.saturating_sub(6).max(1);
+        self.list_page_size = self.page_size;
+    }
+
+    pub fn resize_to(&mut self, width: usize, height: usize) {
+        self.page_size = viewport_rows(width, height);
+        self.list_page_size = if width >= 90 && height >= 24 {
+            (self.page_size / 3).max(1)
+        } else {
+            self.page_size
+        };
     }
 
     fn plugin_id(&self) -> Option<&str> {
@@ -312,9 +326,11 @@ impl Ui {
 
     fn execute(&mut self, invocation: CommandInvocation) {
         let owner = self.app.command_owner(&invocation.id).map(str::to_owned);
+        let output_item = invocation.item.clone();
         match self.app.invoke(invocation) {
             Ok(CommandOutcome::Output(block)) => {
                 self.message.clear();
+                self.output_item = output_item;
                 self.mode = Mode::Output { block, offset: 0 };
             }
             Ok(CommandOutcome::Navigate(navigation)) => {
@@ -468,8 +484,8 @@ impl Ui {
                     Key::BackTab => self.focus = self.focus.previous(),
                     Key::ArrowUp | Key::Char('k') => self.navigate(false, 1),
                     Key::ArrowDown | Key::Char('j') => self.navigate(true, 1),
-                    Key::PageUp => self.navigate(false, self.page_size),
-                    Key::PageDown => self.navigate(true, self.page_size),
+                    Key::PageUp => self.navigate(false, self.list_page_size),
+                    Key::PageDown => self.navigate(true, self.list_page_size),
                     Key::Home => self.navigate(false, usize::MAX),
                     Key::End => self.navigate(true, usize::MAX),
                     Key::Backspace if self.focus == Focus::Items => self.go_parent(),
@@ -658,6 +674,9 @@ impl Ui {
         if width == 0 || height == 0 {
             return String::new();
         }
+        if width >= 90 && height >= 16 {
+            return self.render_split(width, height);
+        }
         let mut rows: Vec<(String, bool)> = vec![(String::new(), false); height];
         if height < 8 || width < 24 {
             rows[0].0 = "Terminal too small (minimum 24x8). q: quit".into();
@@ -824,6 +843,457 @@ impl Ui {
         }
         screen
     }
+
+    fn render_split(&self, width: usize, height: usize) -> String {
+        let width = width - 1; // Keep the terminal's autowrap column unused.
+        let rich = height >= 24;
+        let left = (width * 44 / 100).max(32);
+        let right = width - left - 1;
+        let body_height = viewport_rows(width + 1, height);
+        let list_height = if rich {
+            (body_height / 3).max(1)
+        } else {
+            body_height
+        };
+        let items = self.visible_items();
+        let start = self.selected.saturating_sub(list_height - 1);
+        let selected = items.get(self.selected);
+        let mut rows = Vec::with_capacity(height);
+        let summary = self
+            .app
+            .plugins()
+            .into_iter()
+            .find(|plugin| Some(plugin.id.as_str()) == self.plugin_id())
+            .map_or_else(
+                || "No plugins".into(),
+                |plugin| format!("{} · {}", plugin.id, plugin.status),
+            );
+        rows.push(workspace_header(
+            &self.app.workspace().root().display().to_string(),
+            &summary,
+            width,
+        ));
+        if rich {
+            rows.push(styled_cell(&"─".repeat(width), width, ACCENT));
+            rows.push(styled_cell(&panel_rule(width, '╭', '╮'), width, BORDER));
+        }
+        let plugins = tab_row(
+            &format!("{} Plugins  ", focus_marker(self.focus == Focus::Plugins)),
+            self.plugin_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (id.as_str(), index == self.plugin)),
+            if rich { width - 4 } else { width },
+        );
+        rows.push(if rich {
+            framed_row(&plugins, width)
+        } else {
+            plugins
+        });
+        if rich {
+            rows.push(styled_cell(&panel_rule(width, '╰', '╯'), width, BORDER));
+            rows.push(styled_cell(&panel_rule(width, '╭', '╮'), width, BORDER));
+        }
+
+        let groups = tab_row(
+            &format!("{} Groups   ", focus_marker(self.focus == Focus::Groups)),
+            self.groups
+                .iter()
+                .enumerate()
+                .map(|(index, group)| (group.title.as_str(), index == self.group)),
+            if rich { width - 4 } else { width },
+        );
+        rows.push(if rich {
+            framed_row(&groups, width)
+        } else {
+            groups
+        });
+        if rich {
+            rows.push(styled_cell(&panel_rule(width, '╰', '╯'), width, BORDER));
+        }
+
+        rows.push(styled_cell(
+            &format!(
+                "{} Items ({}/{}) | {} | order: {}",
+                focus_marker(self.focus == Focus::Items),
+                items.len(),
+                self.items.len(),
+                self.view_title,
+                match self.sort {
+                    Sort::Plugin => "plugin",
+                    Sort::Ascending => "title ascending",
+                    Sort::Descending => "title descending",
+                }
+            ),
+            width,
+            MUTED,
+        ));
+        rows.push(panel_pair(
+            &panel_rule(left, '╭', '╮'),
+            &panel_rule(right, '╭', '╮'),
+            BORDER,
+            BORDER,
+        ));
+
+        let (heading, content, selection) = match &self.mode {
+            Mode::Actions { entries, selected } => (
+                format!("Actions | {}", self.selected_item().unwrap_or_default()),
+                entries
+                    .iter()
+                    .map(|action| format!("{} — {}", action.label, action.command_id))
+                    .collect::<Vec<_>>(),
+                Some(*selected),
+            ),
+            Mode::Palette { query, selected } => (
+                format!("Command palette > {query}"),
+                self.palette_commands(query)
+                    .iter()
+                    .map(|command| format!("{} — {}", command.id, command.title))
+                    .collect(),
+                Some(*selected),
+            ),
+            Mode::Output { block, offset } => (
+                format!(
+                    "Output | {} | {} | line {}",
+                    block.source,
+                    block.status,
+                    offset + 1
+                ),
+                block
+                    .content
+                    .lines()
+                    .skip(*offset)
+                    .map(str::to_owned)
+                    .collect(),
+                None,
+            ),
+            Mode::Help { offset } => (
+                "Keyboard help (prototype defaults)".into(),
+                HELP.iter()
+                    .skip(*offset)
+                    .map(|line| (*line).to_owned())
+                    .collect(),
+                None,
+            ),
+            _ => (
+                selected.map_or("Selection".into(), |item| item.title.clone()),
+                selected.map_or_else(
+                    || vec!["No entries".into()],
+                    |item| {
+                        vec![
+                            format!("Kind: {}", item.kind),
+                            format!("Item: {}", item.id),
+                            String::new(),
+                            "Enter   default action".into(),
+                            "a       contextual actions".into(),
+                            "Space   command palette".into(),
+                            String::new(),
+                            "Command results appear here.".into(),
+                        ]
+                    },
+                ),
+                None,
+            ),
+        };
+        rows.push(panel_pair(
+            &panel_cell(
+                &format!(
+                    "{}  ·  {} items",
+                    self.groups
+                        .get(self.group)
+                        .map_or("Items", |group| group.title.as_str()),
+                    items.len()
+                ),
+                left,
+                ACCENT,
+            ),
+            &panel_cell(
+                if rich && matches!(self.mode, Mode::Output { .. }) {
+                    self.output_item.as_deref().unwrap_or(&heading)
+                } else {
+                    &heading
+                },
+                right,
+                TITLE,
+            ),
+            "",
+            "",
+        ));
+        if rich {
+            let metadata = match &self.mode {
+                Mode::Output { .. } => heading.clone(),
+                _ => selected.map_or_else(
+                    || "No selection".into(),
+                    |item| format!("{}  ·  {}", item.kind, self.plugin_id().unwrap_or_default()),
+                ),
+            };
+            rows.push(panel_pair(
+                &panel_cell(
+                    &format!(" {} visible / {} total", items.len(), self.items.len()),
+                    left,
+                    MUTED,
+                ),
+                &panel_cell(&metadata, right, MUTED),
+                "",
+                "",
+            ));
+            rows.push(panel_pair(
+                &panel_cell(&"─".repeat(left - 2), left, BORDER),
+                &panel_cell(&"─".repeat(right - 2), right, BORDER),
+                "",
+                "",
+            ));
+        }
+        let content_start = selection.map_or(0, |index| index.saturating_sub(body_height - 1));
+        for row in 0..body_height {
+            let index = start + if rich { row / 3 } else { row };
+            let item_text = items
+                .get(index)
+                .filter(|_| !rich || row / 3 < list_height)
+                .map(|item| {
+                    if !rich {
+                        return format!("{} {}", focus_marker(index == self.selected), item.title);
+                    }
+                    match row % 3 {
+                        0 => format!(
+                            " {:02} {} {}",
+                            index + 1,
+                            focus_marker(index == self.selected),
+                            item.title
+                        ),
+                        1 => format!("       {}", item.kind),
+                        _ => "─".repeat(left - 2),
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if row == 0 && items.is_empty() {
+                        "  No entries".into()
+                    } else {
+                        String::new()
+                    }
+                });
+            let detail_index = content_start + row;
+            let detail = content.get(detail_index).map_or(String::new(), |line| {
+                if selection.is_some() {
+                    format!("{} {line}", focus_marker(selection == Some(detail_index)))
+                } else if rich {
+                    if let Mode::Output { offset, .. } = self.mode {
+                        format!(" {:>3}  {line}", offset + row + 1)
+                    } else {
+                        format!("  {line}")
+                    }
+                } else {
+                    line.clone()
+                }
+            });
+            rows.push(panel_pair(
+                &panel_cell(
+                    &item_text,
+                    left,
+                    if index == self.selected && !items.is_empty() && (!rich || row % 3 != 2) {
+                        SELECTED
+                    } else if rich && row % 3 == 2 {
+                        BORDER
+                    } else if rich && row % 3 == 1 {
+                        MUTED
+                    } else {
+                        TEXT
+                    },
+                ),
+                &panel_cell(
+                    &detail,
+                    right,
+                    if selection == Some(detail_index) {
+                        SELECTED
+                    } else {
+                        TEXT
+                    },
+                ),
+                "",
+                "",
+            ));
+        }
+        rows.push(panel_pair(
+            &panel_rule(left, '╰', '╯'),
+            &panel_rule(right, '╰', '╯'),
+            BORDER,
+            BORDER,
+        ));
+        let status = match &self.mode {
+            Mode::Command(input) => format!(":{input}_"),
+            Mode::Search { .. } => format!("/{}_", self.filter),
+            _ if self.pending.is_some() => {
+                "f … o: open  p: preview  s: path  u: parent  Esc: cancel".into()
+            }
+            _ if !self.message.is_empty() => format!("Error: {}", self.message),
+            _ => format!(
+                "{:?} | {} | filter: {}",
+                self.focus,
+                self.selected_item().unwrap_or_default(),
+                self.filter
+            ),
+        };
+        rows.push(styled_cell(
+            &status,
+            width,
+            if self.message.is_empty() {
+                MUTED
+            } else {
+                ERROR
+            },
+        ));
+        if rich {
+            rows.push(styled_cell(&panel_rule(width, '╭', '╮'), width, BORDER));
+        }
+        let hints: &[(&str, &str)] = match self.mode {
+            Mode::Normal => &[
+                ("↑↓", "Select"),
+                ("Tab", "Focus"),
+                ("Enter", "Open"),
+                ("a", "Actions"),
+                ("/", "Search"),
+                ("Space", "Commands"),
+                ("?", "Help"),
+                ("q", "Quit"),
+            ],
+            Mode::Output { .. } | Mode::Help { .. } => &[
+                ("↑↓", "Scroll"),
+                ("PgUp/PgDn", "Page"),
+                ("Esc", "Back"),
+                ("q", "Quit"),
+            ],
+            Mode::Actions { .. } => &[("↑↓", "Select action"), ("Enter", "Run"), ("Esc", "Back")],
+            Mode::Palette { .. } => &[
+                ("Type", "Filter"),
+                ("↑↓", "Select"),
+                ("Enter", "Run"),
+                ("Esc", "Back"),
+            ],
+            _ => &[("Type", "Text"), ("Enter", "Accept"), ("Esc", "Cancel")],
+        };
+        let hints = hint_row(hints, if rich { width - 4 } else { width });
+        rows.push(if rich {
+            framed_row(&hints, width)
+        } else {
+            hints
+        });
+        if rich {
+            rows.push(styled_cell(&panel_rule(width, '╰', '╯'), width, BORDER));
+        }
+        let mut screen = String::from("\x1b[H");
+        for (index, row) in rows.iter().enumerate() {
+            screen.push_str("\x1b[2K");
+            screen.push_str(row);
+            screen.push_str("\x1b[0m");
+            if index + 1 < rows.len() {
+                screen.push_str("\r\n");
+            }
+        }
+        screen
+    }
+}
+
+const TEXT: &str = "\x1b[38;2;211;221;239m\x1b[48;2;3;16;24m";
+const MUTED: &str = "\x1b[38;2;135;165;200m\x1b[48;2;3;16;24m";
+const ACCENT: &str = "\x1b[38;2;70;190;235m\x1b[48;2;3;16;24m";
+const BORDER: &str = "\x1b[38;2;38;117;155m\x1b[48;2;3;16;24m";
+const SELECTED: &str = "\x1b[38;2;230;211;255m\x1b[48;2;43;30;76m";
+const ERROR: &str = "\x1b[38;2;255;160;135m\x1b[48;2;3;16;24m";
+const TITLE: &str = "\x1b[1m\x1b[38;2;230;235;245m\x1b[48;2;3;16;24m";
+const PURPLE: &str = "\x1b[1m\x1b[38;2;171;92;245m\x1b[48;2;3;16;24m";
+const KEYCAP: &str = "\x1b[38;2;228;232;245m\x1b[48;2;20;44;65m";
+
+fn viewport_rows(width: usize, height: usize) -> usize {
+    if width >= 90 && height >= 24 {
+        height - 18
+    } else if width >= 90 && height >= 16 {
+        height - 9
+    } else {
+        height.saturating_sub(6).max(1)
+    }
+}
+
+fn workspace_header(path: &str, status: &str, width: usize) -> String {
+    let status_width = console::measure_text_width(&safe_text(status)).min(width / 3);
+    let path_width = width.saturating_sub(23 + status_width);
+    format!(
+        "{}{}{}{}{}",
+        styled_cell("Terminal ", 9, ACCENT),
+        styled_cell("Workspace", 9, PURPLE),
+        styled_cell("  │  ", 5, BORDER),
+        styled_cell(path, path_width, ACCENT),
+        styled_cell(status, status_width, MUTED),
+    )
+}
+
+fn framed_row(content: &str, width: usize) -> String {
+    debug_assert_eq!(console::measure_text_width(content), width - 4);
+    format!("{BORDER}│{TEXT} {content}{TEXT} {BORDER}│\x1b[0m")
+}
+
+fn hint_row(hints: &[(&str, &str)], width: usize) -> String {
+    let mut row = String::new();
+    let mut remaining = width;
+    for (key, label) in hints {
+        let key_width = console::measure_text_width(key) + 2;
+        let label = format!(" {label}  ");
+        let label_width = console::measure_text_width(&label);
+        if key_width + label_width > remaining {
+            break;
+        }
+        row.push_str(&styled_cell(&format!(" {key} "), key_width, KEYCAP));
+        row.push_str(&styled_cell(&label, label_width, TEXT));
+        remaining -= key_width + label_width;
+    }
+    row.push_str(&styled_cell("", remaining, TEXT));
+    row
+}
+
+fn styled_cell(text: &str, width: usize, style: &str) -> String {
+    let text = safe_text(text);
+    let text = truncate_str(&text, width, "");
+    let padding = width.saturating_sub(console::measure_text_width(&text));
+    format!("{style}{text}{}\x1b[0m", " ".repeat(padding))
+}
+
+fn tab_row<'a>(prefix: &str, tabs: impl Iterator<Item = (&'a str, bool)>, width: usize) -> String {
+    let mut row = styled_cell(
+        prefix,
+        width.min(console::measure_text_width(prefix)),
+        MUTED,
+    );
+    let mut remaining = width.saturating_sub(console::measure_text_width(prefix));
+    for (title, active) in tabs {
+        let title = safe_text(title);
+        let label = if active { format!("[{title}]") } else { title };
+        let size = (console::measure_text_width(&label) + 3).min(remaining);
+        row.push_str(&styled_cell(
+            &label,
+            size,
+            if active { SELECTED } else { TEXT },
+        ));
+        remaining -= size;
+        if remaining == 0 {
+            break;
+        }
+    }
+    row.push_str(&styled_cell("", remaining, TEXT));
+    row
+}
+
+fn panel_cell(text: &str, width: usize, style: &str) -> String {
+    format!(
+        "{BORDER}│{TEXT} {}{TEXT} {BORDER}│\x1b[0m",
+        styled_cell(text, width - 4, style),
+    )
+}
+
+fn panel_rule(width: usize, first: char, last: char) -> String {
+    format!("{first}{}{last}", "─".repeat(width - 2))
+}
+
+fn panel_pair(left: &str, right: &str, left_style: &str, right_style: &str) -> String {
+    format!("{left_style}{left}{TEXT} {right_style}{right}\x1b[0m")
 }
 
 fn move_index(index: usize, len: usize, forward: bool, count: usize) -> usize {

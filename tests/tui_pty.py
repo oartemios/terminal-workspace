@@ -133,6 +133,17 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
         session.wait_for(b"Terminal too small")
         session.resize(80, 24)
         session.wait_for(b"> Items")
+        session.resize(120, 32)
+        session.wait_for("╭".encode())
+        session.send(b"\x1b", b"> Items")
+        session.send("/заметка\r".encode(), "filter: заметка".encode())
+        wide_output = session.send(b"fp", b"preview through the real terminal")
+        assert "> заметка.md".encode() in wide_output
+        session.send(b"\x1b", b"> Items")
+        session.send(b"a", b"Actions |")
+        session.send(b"\x1b", b"> Items")
+        session.send(b" ", b"Command palette")
+        session.send(b"\x1b", b"> Items")
         session.exit(b"\x03")
         print(f"PTY workflow, nested/empty directories, parent selection, Unicode, arrows, resize and Ctrl-C: passed (first frame {session.startup_ms:.1f} ms; directory {open_ms:.1f} ms; parent {parent_ms:.1f} ms)")
     finally:

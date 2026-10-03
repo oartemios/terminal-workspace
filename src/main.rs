@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let size = terminal.size();
         if dirty || size != last_size {
-            ui.resize(size.1);
+            ui.resize_to(size.0, size.1);
             terminal.draw(&ui.render(size.0, size.1))?;
             last_size = size;
             dirty = false;
