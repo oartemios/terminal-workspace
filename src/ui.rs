@@ -71,6 +71,7 @@ const HELP: &[&str] = &[
     "s   sort: plugin order / title ascending / descending",
     "r   refresh the current group",
     "Plugin bindings are local; see current bindings below",
+    "Other item commands: a actions / Space palette / : commands",
     ", e/d/s   enable / disable / suspend selected plugin",
     ", p   plugin states; , g/r   grant / revoke WorkspaceRead",
     "a on Plugins   activation and permission actions",

@@ -239,9 +239,11 @@ fn overrides_follow_workspace_scope_and_long_sequences_are_discoverable_and_canc
     std::fs::write(second.0.join("other.txt"), "second preview").unwrap();
     first.config(json!({"version":1,"plugins":{},"overrides":{"keybindings":[
         {"keys":"p","plugin":"files","command":null},
+        {"keys":"fp","plugin":"files","command":"files.preview"},
         {"keys":"xyz界","plugin":"files","command":"files.preview"},
         {"keys":"v","plugin":"files","command":"files.path"},
         {"keys":"v","plugin":"files","group":"entries","location":"notes","command":"files.preview"},
+        {"keys":"y","plugin":"files","group":"entries","command":"files.path"},
         {"keys":"y","plugin":"files","group":"entries","location":"notes","command":null}
     ]}}));
     let app = first.app();
@@ -258,6 +260,10 @@ fn overrides_follow_workspace_scope_and_long_sequences_are_discoverable_and_canc
     ui.handle(Key::Enter);
     text(&mut ui, "p");
     assert!(!frame(&ui).contains("override preview"));
+    // Removed defaults remain valid explicit user overrides.
+    text(&mut ui, "fp");
+    assert!(frame(&ui).contains("override preview"));
+    ui.handle(Key::Escape);
     text(&mut ui, "xy");
     for (width, height) in [(160, 30), (80, 24)] {
         let rendered = strip_ansi_codes(&ui.render(width, height)).into_owned();
@@ -298,6 +304,7 @@ fn conflicting_or_malformed_bindings_are_reported_without_blocking_core_or_valid
     std::fs::write(project.0.join("note.txt"), "valid preview").unwrap();
     project.config(json!({"version":1,"plugins":{},"overrides":{"keybindings":[
         {"keys":"f","plugin":"files","command":"files.preview"},
+        {"keys":"fp","plugin":"files","command":"files.path"},
         {"keys":"x","plugin":"files","command":"files.path"},
         {"keys":"x","plugin":"files","command":"files.preview"},
         {"keys":"j","plugin":"files","command":"files.preview"},

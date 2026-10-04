@@ -142,29 +142,14 @@ impl Plugin for CatalogPlugin {
     }
 
     fn keybindings(&self) -> Vec<KeyBinding> {
-        vec![
-            KeyBinding {
-                keys: "o".into(),
-                command_id: "catalog.open".into(),
-                scope: BindingScope::Plugin("catalog".into()),
+        vec![KeyBinding {
+            keys: "p".into(),
+            command_id: "catalog.read".into(),
+            scope: BindingScope::View {
+                plugin: "catalog".into(),
+                group: "sections".into(),
+                location: "intro".into(),
             },
-            KeyBinding {
-                keys: "u".into(),
-                command_id: "catalog.parent".into(),
-                scope: BindingScope::Group {
-                    plugin: "catalog".into(),
-                    group: "sections".into(),
-                },
-            },
-            KeyBinding {
-                keys: "nrd".into(),
-                command_id: "catalog.read".into(),
-                scope: BindingScope::View {
-                    plugin: "catalog".into(),
-                    group: "sections".into(),
-                    location: "intro".into(),
-                },
-            },
-        ]
+        }]
     }
 }

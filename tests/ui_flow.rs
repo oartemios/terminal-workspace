@@ -57,7 +57,7 @@ fn split_layout_keeps_items_visible_and_bounds_untrusted_output() {
     .unwrap();
     let mut ui = fixture.ui();
     select(&mut ui, "заметка.md");
-    type_text(&mut ui, "fp");
+    type_text(&mut ui, "p");
     for (width, height) in [
         (90, 16),
         (90, 24),
@@ -96,7 +96,7 @@ fn split_output_scrolls_to_the_final_line_after_resize() {
     .unwrap();
     let mut ui = fixture.ui();
     ui.resize_to(120, 24);
-    type_text(&mut ui, "fp");
+    type_text(&mut ui, "p");
     ui.handle(Key::End);
     assert!(strip_ansi_codes(&ui.render(120, 24)).contains("line 60"));
     ui.resize_to(90, 16);
@@ -211,7 +211,7 @@ fn unicode_filter_cancel_and_empty_group_are_usable() {
     ui.handle(Key::Escape);
     assert!(frame(&ui).contains("заметка.md"));
     select(&mut ui, "заметка");
-    type_text(&mut ui, "fp");
+    type_text(&mut ui, "p");
     assert!(frame(&ui).contains("текст"));
 }
 
@@ -224,7 +224,7 @@ fn frame_is_bounded_and_file_controls_cannot_change_the_terminal() {
     )
     .unwrap();
     let mut ui = fixture.ui();
-    type_text(&mut ui, "fp");
+    type_text(&mut ui, "p");
     let screen = ui.render(30, 8);
     // Terminal control bytes in the content are replaced before rendering.
     assert!(!screen.contains("\x1b[2J"));
@@ -251,7 +251,7 @@ fn long_list_and_output_scroll_keep_the_selection_visible() {
     ui.resize(10);
     ui.handle(Key::End);
     assert!(strip_ansi_codes(&ui.render(60, 10)).contains("> ▤ file-49.txt"));
-    type_text(&mut ui, "fp");
+    type_text(&mut ui, "p");
     ui.handle(Key::End);
     let output = strip_ansi_codes(&ui.render(60, 10)).into_owned();
     assert!(output.contains("line 49"));
@@ -424,7 +424,9 @@ fn directory_commands_share_navigation_and_restore_parent_selection() {
                 ui.handle(Key::Char('a'));
                 ui.handle(Key::Enter);
             }
-            2 => type_text(&mut ui, "fo"),
+            2 => {
+                ui.handle(Key::Char('l'));
+            }
             3 => {
                 ui.handle(Key::Char(':'));
                 type_text(&mut ui, "files.open notes");
@@ -442,7 +444,7 @@ fn directory_commands_share_navigation_and_restore_parent_selection() {
             frame(&ui)
         );
         assert!(frame(&ui).contains("> ▤ заметка.md"));
-        type_text(&mut ui, "fp");
+        type_text(&mut ui, "p");
         assert!(frame(&ui).contains("nested preview"));
         ui.handle(Key::Escape);
         match route {
@@ -452,7 +454,9 @@ fn directory_commands_share_navigation_and_restore_parent_selection() {
             1 => {
                 ui.handle(Key::Char('h'));
             }
-            2 => type_text(&mut ui, "fu"),
+            2 => {
+                ui.handle(Key::Backspace);
+            }
             3 => {
                 ui.handle(Key::Char(':'));
                 type_text(&mut ui, "files.parent");
@@ -468,7 +472,7 @@ fn directory_commands_share_navigation_and_restore_parent_selection() {
         assert!(frame(&ui).contains("> ▸ notes/"));
         assert!(frame(&ui).contains("filter: notes"));
         // A parent operation at root stays inside the workspace.
-        type_text(&mut ui, "fu");
+        ui.handle(Key::Backspace);
         assert!(frame(&ui).contains("| / |"));
         assert!(!frame(&ui).contains("Error:"));
     }

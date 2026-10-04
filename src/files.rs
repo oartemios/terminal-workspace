@@ -141,23 +141,11 @@ impl Plugin for FilesPlugin {
     }
 
     fn keybindings(&self) -> Vec<KeyBinding> {
-        [
-            ("p", "preview"),
-            ("y", "path"),
-            ("o", "open"),
-            ("u", "parent"),
-            ("fp", "preview"),
-            ("fs", "path"),
-            ("fo", "open"),
-            ("fu", "parent"),
-        ]
-        .into_iter()
-        .map(|(keys, command)| KeyBinding {
-            keys: keys.into(),
-            command_id: format!("files.{command}"),
+        vec![KeyBinding {
+            keys: "p".into(),
+            command_id: "files.preview".into(),
             scope: BindingScope::Plugin("files".into()),
-        })
-        .collect()
+        }]
     }
 
     fn execute(

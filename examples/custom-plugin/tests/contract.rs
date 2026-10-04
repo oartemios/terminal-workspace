@@ -106,13 +106,14 @@ fn installed_custom_plugin_switches_projects_and_all_routes_use_current_settings
     fn frame(ui: &Ui) -> String {
         strip_ansi_codes(&ui.render(180, 32)).into_owned()
     }
-    text(&mut ui, "o");
-    text(&mut ui, "n");
-    assert!(frame(&ui).contains("n … rd: catalog.read"));
+    // Opening and returning use the same UI navigation as Files.
+    text(&mut ui, "l");
+    ui.resize_to(180, 32);
+    ui.handle(Key::Char('?'));
+    ui.handle(Key::End);
+    assert!(frame(&ui).contains("catalog.read"), "{}", frame(&ui));
     ui.handle(Key::Escape);
-    text(&mut ui, "rd");
-    assert!(!frame(&ui).contains("First greeting"));
-    text(&mut ui, "nrd");
+    text(&mut ui, "p");
     assert!(frame(&ui).contains("First greeting"));
     ui.handle(Key::Escape);
     text(
@@ -122,10 +123,10 @@ fn installed_custom_plugin_switches_projects_and_all_routes_use_current_settings
     ui.handle(Key::Enter);
     assert!(frame(&ui).contains("Introduction section"));
     assert!(!frame(&ui).contains("Welcome note"));
-    text(&mut ui, "o");
+    text(&mut ui, "l");
     for route in 0..4 {
         match route {
-            0 => text(&mut ui, "nrd"),
+            0 => text(&mut ui, "p"),
             1 => {
                 text(&mut ui, ":catalog.read");
                 ui.handle(Key::Enter);
@@ -149,13 +150,13 @@ fn installed_custom_plugin_switches_projects_and_all_routes_use_current_settings
     }
     text(&mut ui, ",b");
     assert!(frame(&ui).contains("Welcome note"));
-    text(&mut ui, "nrd");
+    text(&mut ui, "p");
     assert!(frame(&ui).contains("First greeting"));
     ui.handle(Key::Escape);
-    text(&mut ui, "u");
+    text(&mut ui, "h");
     assert!(frame(&ui).contains("> • Introduction section"));
     // View-scoped bindings disappear when leaving that view.
-    text(&mut ui, "nrd");
+    text(&mut ui, "p");
     assert!(!frame(&ui).contains("First greeting"));
     for root in roots {
         std::fs::remove_dir_all(root).unwrap();
