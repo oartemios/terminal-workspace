@@ -1,0 +1,87 @@
+name: Build and test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTUP_TOOLCHAIN: stable
+      # Runtime tests spawn workers with a 1 s request deadline. Avoid competing
+      # process-heavy tests on shared runners; the application deadline stays intact.
+      RUST_TEST_THREADS: '1'
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check native target
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = '${{ matrix.target }}'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Initialize system Git
+        run: /usr/bin/git --version
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --all-targets
+      - name: Test independent custom plugin
+        run: cargo test --locked --manifest-path examples/custom-plugin/Cargo.toml --target-dir target/custom-plugin
+      - name: Build release
+        run: cargo build --locked --release --bin tw
+      - name: Package archive
+        run: sh scripts/package.sh '${{ matrix.target }}'
+      - name: Verify archive and local installation
+        run: |
+          cd dist
+          shasum -a 256 -c terminal-workspace-${{ matrix.target }}.tar.gz.sha256
+          mkdir extracted
+          tar -xzf terminal-workspace-${{ matrix.target }}.tar.gz -C extracted
+          sh extracted/terminal-workspace-${{ matrix.target }}/install.sh "$RUNNER_TEMP/tw-install"
+          test -x "$RUNNER_TEMP/tw-install/bin/tw"
+      - name: Test installed release in a terminal
+        env:
+          TW_TEST_BINARY: ${{ runner.temp }}/tw-install/bin/tw
+        run: python3 tests/tui_pty.py
+      - name: Upload installable archive
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: terminal-workspace-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30

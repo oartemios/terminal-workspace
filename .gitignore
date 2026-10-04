@@ -1,4 +1,5 @@
 /target/
+/dist/
 /examples/custom-plugin/target/
 /.terminal-workspace.json
 /.terminal-workspace.json.tmp-*

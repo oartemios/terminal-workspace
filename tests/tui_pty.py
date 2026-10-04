@@ -12,7 +12,7 @@ import termios
 import time
 
 
-BINARY = Path(__file__).resolve().parents[1] / "target/debug/tw"
+BINARY = Path(os.environ["TW_TEST_BINARY"]).resolve() if "TW_TEST_BINARY" in os.environ else Path(__file__).resolve().parents[1] / "target/debug/tw"
 PLUGIN_STORE = tempfile.TemporaryDirectory(prefix="tw-pty-global-plugins-")
 
 
