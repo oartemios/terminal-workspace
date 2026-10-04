@@ -34,6 +34,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
+      # Runtime tests spawn workers with a 1 s request deadline. Avoid competing
+      # process-heavy tests on shared runners; the application deadline stays intact.
+      RUST_TEST_THREADS: '1'
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     defaults:
       run:
@@ -49,6 +52,8 @@ jobs:
           test "$(rustc -vV | sed -n 's/^host: //p')" = '${{ matrix.target }}'
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Initialize system Git
+        run: /usr/bin/git --version
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test

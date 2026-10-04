@@ -13,3 +13,5 @@
 Каждая платформа проходит fmt, Clippy, all-targets tests, independently packaged custom plugin, release build, упаковку, SHA-256, распаковку, установку в временный prefix и полный PTY-сценарий установленного бинарника. `TW_TEST_BINARY` позволяет использовать существующий PTY suite для release, не меняя defaults локального запуска. Архив tar сохраняет executable permissions внутри GitHub artifact ZIP. В архиве есть TARGET, COMMIT, README и installer; checksum рядом. SHA-256 проверяет целостность, не заменяет подпись происхождения. Артефакты хранятся 30 дней и доступны на PR, main и manual runs. Минимальные права workflow — contents:read; secrets не нужны.
 
 Глобальные пакеты плагинов имеют отдельный lifecycle и не перезаписываются installer. README описывает отдельное обновление существующих Files/Git executable через package CLI.
+
+Первый CI прогон прошёл Linux x86_64/ARM64 и macOS ARM64; macOS Intel получил timeouts Git worker при параллельном выполнении пяти process-heavy тестов. CI запускает Rust tests последовательно (`RUST_TEST_THREADS=1`) и заранее вызывает системный Git. Deadline runtime остаётся 1 s; проверки и их assertions не отключаются.
