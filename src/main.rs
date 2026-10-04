@@ -12,6 +12,10 @@ use terminal_workspace::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if matches!(args.as_slice(), [flag] if flag == "--version" || flag == "-V") {
+        println!("tw {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--serve-files") {
         return serve_plugin(&FilesPlugin).map_err(Into::into);
     }
