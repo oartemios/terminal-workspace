@@ -45,7 +45,8 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - name: Check native target
-        run: test "$(rustc -vV | sed -n 's/^host: //p')" = '${{ matrix.target }}'
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = '${{ matrix.target }}'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
