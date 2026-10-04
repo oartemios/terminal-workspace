@@ -6,6 +6,8 @@
 
 ## Установка готовой сборки
 
+Для выпущенных версий скачай `.tar.gz` и соответствующий `.sha256` в [GitHub Releases](https://github.com/oartemios/terminal-workspace/releases). Для первого релиза версия архива — `0.1.0`; установка ниже одинакова для Release и Actions.
+
 Открой [GitHub Actions → Build and test](https://github.com/oartemios/terminal-workspace/actions/workflows/build.yml), выбери успешный запуск для нужного commit и скачай соответствующий artifact. Имя содержит версию и платформу: `terminal-workspace-<build-version>-<target>`. Для скачивания через веб-интерфейс нужно войти в GitHub. Внешний ZIP содержит `.tar.gz` и файл SHA-256; артефакты хранятся 30 дней. PR/main используют `0.1.0+dev.<commit>`, тег `v0.1.0` — `0.1.0`. Правила версий и выпуска: [versioning](docs/versioning.md), изменения: [changelog](CHANGELOG.md).
 
 | Компьютер | Artifact |
