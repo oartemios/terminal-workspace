@@ -12,6 +12,8 @@ cargo run --offline -- .
 
 Аргумент `.` — каталог проекта; можно указать другой локальный каталог. После сборки исполняемый файл находится в `target/debug/tw`. Нужен интерактивный терминал macOS или Linux.
 
+При первом запуске Files устанавливается в глобальный каталог `~/.local/share/terminal-workspace/plugins`, получает доверие как явный bundled default и включается для проекта. `TW_PLUGIN_DIR` задаёт альтернативный абсолютный путь. После явного uninstall Files автоматически не возвращается. Код пакетов не хранится в Workspace.
+
 Для первой проверки нажми `/`, введи `README.md`, затем Enter. Нажми `a`, выбери `Preview file` клавишей ↓ и нажми Enter. Esc вернёт к списку файлов. Ту же операцию вызывают клавиша `p`, палитра (Space → `preview` → Enter) и строка `:files.preview README.md`.
 
 Для навигации выдели каталог и нажми Enter или `l`. Backspace или `h` вернёт к родительскому каталогу с выделением каталога, из которого ты вышел. Текущий путь показан над списком; фильтр и выбор сохраняются при повторном открытии каталога. Корень Workspace остаётся границей навигации. Команды `:files.open src` и `:files.parent` выполняют те же переходы.
@@ -61,13 +63,20 @@ cargo run --offline -- .
 
 | Команда | Клавиши | Результат |
 | --- | --- | --- |
-| `:core.plugins` | `, p` | Установленные плагины и активация |
+| `:core.plugins` | `, p` | Installation, Workspace/session activation, availability и connection |
 | `:core.plugin.suspend files` | `, s` | Отключить до конца сессии |
 | `:core.plugin.disable files` | `, d` | Отключить для проекта, сохранив настройки |
 | `:core.plugin.enable files` | `, e` | Включить для проекта и сессии |
 | `:core.permissions files` | Через палитру или Actions | Запрошенные и выданные разрешения |
-| `:core.permission.revoke-read files` | `, r` | Отозвать WorkspaceRead |
-| `:core.permission.grant-read files` | `, g` | Выдать WorkspaceRead |
+| `:core.permission.revoke files WorkspaceRead` | `, r` | Отозвать WorkspaceRead |
+| `:core.permission.grant files WorkspaceRead` | `, g` | Выдать WorkspaceRead |
+| `:core.plugin.install /путь/к/пакету` | Через палитру | Установить пакет без запуска |
+| `:core.plugins.discover` | Через палитру | Перечитать глобальный каталог |
+| `:core.plugin.trust files` / `untrust files` | Через палитру или Actions | Разрешить / запретить запуск native executable |
+| `:core.plugin.restart files` | Через палитру или Actions | Повторить запуск после сбоя |
+| `:core.plugin.uninstall files` | Через палитру или Actions | Удалить пакет, сохранив настройки проекта |
+
+Категории разрешений: `WorkspaceRead`, `WorkspaceWrite`, `Process`, `Network`, `Credentials`, `Environment`. Host проверяет все объявленные категории перед запуском. Это не OS sandbox: trusted executable имеет права пользователя ОС. Старые `grant-read`/`revoke-read` остаются aliases общего маршрута. Отзыв разрешения, suspend, disable и uninstall останавливают worker и его группу процессов в текущем приложении.
 
 Bindings и палитра используют выбранную вкладку плагина, даже когда в списке нет Item. Явный plugin id в командной строке имеет приоритет. Esc закрывает результат. Отключение последнего активного плагина сохраняет доступ к Core-командам и повторному включению.
 
@@ -83,16 +92,32 @@ cargo clippy --offline --all-targets -- -D warnings
 
 После `cargo build --offline` можно выполнить `python3 tests/tui_pty.py`: проверяется реальный Unix PTY, ввод Unicode, стрелки, Esc, изменение размера и восстановление терминала после `q`, Ctrl-C и Ctrl-D.
 
-`src/lib.rs` — Workspace, разрешения, состояние плагинов и реестр команд. `src/bindings.rs` — области действия, overrides и конфликты bindings. `src/files.rs` — предметная логика Files. `src/ui.rs` — состояние, навигация и рендер TUI. `src/terminal.rs` — ввод, размер терминала и восстановление его настроек. `tests/` проверяет ядро и клавиатурные сценарии интерфейса.
+`src/runtime/` — установка пакетов, процессный runtime и SDK сервера. `src/lib.rs` — Workspace, разрешения, состояние плагинов и реестр команд. `src/bindings.rs` — области действия, overrides и конфликты bindings. `src/files.rs` — предметная логика Files. `src/ui.rs` — состояние, навигация и рендер TUI. `src/terminal.rs` — ввод, размер терминала и восстановление его настроек. `tests/` проверяет ядро и клавиатурные сценарии интерфейса.
 
 Технический выбор терминального слоя описан в [решении реализации](docs/decisions/0001-terminal-ui.md).
 
-[Draft Plugin API v0.3](docs/plugin-api.md) проверяется на независимо упакованном [custom plugin](examples/custom-plugin/README.md). Его тесты запускаются отдельно:
+[Draft Plugin API v0.4](docs/plugin-api.md) проверяется на независимо упакованном [custom plugin](examples/custom-plugin/README.md). Его тесты запускаются отдельно:
 
 ```sh
 cargo test --offline --manifest-path examples/custom-plugin/Cargo.toml --target-dir target/custom-plugin
 ```
 
+## Пакеты плагинов
+
+Пакет — `plugin.json` и один executable; JSON-lines protocol 1 описан в [контракте](docs/plugin-protocol.md). Установка и discovery не запускают код. Для внешнего пакета отдельно выдаются trust, Workspace activation и запрошенные permissions. Пример сборки и установки без пересборки `tw`: [Catalog](examples/custom-plugin/README.md).
+
+CLI доступен без TUI:
+
+```sh
+target/debug/tw plugins install /путь/к/пакету
+target/debug/tw plugins list
+target/debug/tw plugins trust catalog
+```
+
+CLI также поддерживает `untrust <id>`, `uninstall <id>` и `package-files <новый-каталог>`. Он меняет глобальную установку; активация для проекта задаётся в TUI. Files использует тот же процессный контракт, что Catalog.
+
 ## Текущие границы
 
-Files показывает содержимое каталогов внутри Workspace и первые 8 KiB файла. Активация и WorkspaceRead сохраняются в `.terminal-workspace.json`; временное отключение живёт до конца сессии. Settings и keybinding overrides редактируются вручную и применяются при открытии проекта. Состояние UI между запусками не сохраняется; bindings пока поддерживают только последовательности печатных символов без пробелов. Плагины связаны с процессом Rust через trait: проверки разрешений не изолируют недоверенный код. Custom plugin упакован отдельно как Rust crate; глобальная установка, динамическая загрузка и асинхронные сетевые операции относятся к следующим этапам.
+Files показывает содержимое каталогов внутри Workspace и первые 8 KiB файла. Settings и keybinding overrides редактируются вручную и применяются при открытии проекта. UI-состояние между запусками не сохраняется; bindings поддерживают последовательности печатных символов без пробелов.
+
+Пакеты — доверяемые пользователем native executables без OS sandbox. Host проверяет объявленные permissions, ограничивает environment и предоставляет проверяемые path helpers SDK; прямой доступ executable к ОС этим не изолирован. Credentials пока передаются только по явно указанным именам environment variables, без keychain/vault. Requests синхронны с deadline 1 s, handshake — 5 s: медленный worker может временно задержать TUI. Async, Git и GitHub ещё не реализованы. Performance-цели MVP не достигнуты/не подтверждены; debug PTY startup около 1.06 s. Ограничения и измерения: [решение runtime](docs/decisions/0006-executable-plugin-runtime.md).

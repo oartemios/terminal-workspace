@@ -560,7 +560,10 @@ fn core_activation_routes_work_without_an_item_and_recover_the_view() {
                 ui.handle(Key::Tab);
                 ui.handle(Key::Char('a'));
                 assert!(frame(&ui).contains("Actions | files"));
-                for _ in 0..5 {
+                for _ in 0..30 {
+                    if frame(&ui).contains("> Disable plugin until session ends") {
+                        break;
+                    }
                     ui.handle(Key::ArrowDown);
                 }
                 ui.handle(Key::Enter);

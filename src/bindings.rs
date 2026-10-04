@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Scope identifiers are native plugin identifiers, including opaque view locations.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum BindingScope {
     Global,
     Plugin(String),

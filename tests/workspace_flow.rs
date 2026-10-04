@@ -169,7 +169,10 @@ fn keyboard_routes_switch_and_restore_project_context_without_cached_data() {
             _ => {
                 ui.handle(Key::Tab);
                 text(&mut ui, "a");
-                for _ in 0..6 {
+                for _ in 0..30 {
+                    if frame(&ui).contains("> Open Workspace (project path)") {
+                        break;
+                    }
                     ui.handle(Key::ArrowDown);
                 }
                 ui.handle(Key::Enter);

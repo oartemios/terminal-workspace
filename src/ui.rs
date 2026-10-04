@@ -127,12 +127,21 @@ pub struct Ui {
 
 impl Ui {
     pub fn new(app: App) -> Self {
-        let plugin_ids = app.plugins().into_iter().map(|plugin| plugin.id).collect();
+        let states = app.plugins();
+        let plugin = states
+            .iter()
+            .position(|state| {
+                state.status == "active"
+                    && state.runtime.availability == crate::runtime::Availability::Available
+            })
+            .or_else(|| states.iter().position(|state| state.status == "active"))
+            .unwrap_or(0);
+        let plugin_ids = states.into_iter().map(|plugin| plugin.id).collect();
         let commands = app.commands().into_iter().cloned().collect();
         let mut ui = Self {
             app,
             plugin_ids,
-            plugin: 0,
+            plugin,
             groups: Vec::new(),
             group: 0,
             items: Vec::new(),
@@ -349,7 +358,15 @@ impl Ui {
         self.sort = Sort::Plugin;
         self.output_item = None;
         self.pending.clear();
-        self.plugin = 0;
+        let states = self.app.plugins();
+        self.plugin = states
+            .iter()
+            .position(|state| {
+                state.status == "active"
+                    && state.runtime.availability == crate::runtime::Availability::Available
+            })
+            .or_else(|| states.iter().position(|state| state.status == "active"))
+            .unwrap_or(0);
         self.focus = Focus::Items;
         let saved = self.workspaces.remove(self.app.workspace().root());
         if let Some(state) = &saved {
@@ -357,7 +374,7 @@ impl Ui {
                 .plugin
                 .as_ref()
                 .and_then(|id| self.plugin_ids.iter().position(|p| p == id))
-                .unwrap_or(0);
+                .unwrap_or(self.plugin);
         }
         self.load_groups();
         if let Some(state) = saved {
@@ -466,9 +483,25 @@ impl Ui {
 
     fn invocation(&self, id: String, explicit_item: Option<String>) -> CommandInvocation {
         if id.starts_with("core.") {
+            if matches!(
+                id.as_str(),
+                "core.permission.grant" | "core.permission.revoke"
+            ) {
+                return CommandInvocation {
+                    id,
+                    item: None,
+                    args: explicit_item
+                        .map(|args| args.split_whitespace().map(str::to_owned).collect())
+                        .unwrap_or_default(),
+                };
+            }
             let args = if matches!(
                 id.as_str(),
-                "core.plugins" | "core.workspace.open" | "core.workspace.previous"
+                "core.plugins"
+                    | "core.plugins.discover"
+                    | "core.plugin.install"
+                    | "core.workspace.open"
+                    | "core.workspace.previous"
             ) {
                 explicit_item.into_iter().collect()
             } else {
@@ -514,6 +547,25 @@ impl Ui {
             self.mode = Mode::Command("core.workspace.open ".into());
             return;
         }
+        if invocation.id == "core.plugin.install" && invocation.args.is_empty() {
+            self.mode = Mode::Command("core.plugin.install ".into());
+            return;
+        }
+        if matches!(
+            invocation.id.as_str(),
+            "core.permission.grant" | "core.permission.revoke"
+        ) && invocation.args.len() < 2
+        {
+            let plugin = invocation
+                .args
+                .first()
+                .map(String::as_str)
+                .or_else(|| self.plugin_id())
+                .unwrap_or_default();
+            self.mode = Mode::Command(format!("{} {} ", invocation.id, plugin));
+            return;
+        }
+
         let workspace_change = invocation.id.starts_with("core.workspace.");
         let previous = if workspace_change {
             Some((
@@ -530,6 +582,14 @@ impl Ui {
                 | "core.plugin.suspend"
                 | "core.permission.grant-read"
                 | "core.permission.revoke-read"
+                | "core.permission.grant"
+                | "core.permission.revoke"
+                | "core.plugin.install"
+                | "core.plugins.discover"
+                | "core.plugin.trust"
+                | "core.plugin.untrust"
+                | "core.plugin.uninstall"
+                | "core.plugin.restart"
         );
         let owner = self.app.command_owner(&invocation.id).map(str::to_owned);
         let output_item = invocation.item.clone();
@@ -543,6 +603,17 @@ impl Ui {
             }
             Ok(CommandOutcome::Output(block)) => {
                 if changes_state {
+                    let selected_plugin = self.plugin_id().map(str::to_owned);
+                    self.plugin_ids = self
+                        .app
+                        .plugins()
+                        .into_iter()
+                        .map(|plugin| plugin.id)
+                        .collect();
+                    self.commands = self.app.commands().into_iter().cloned().collect();
+                    self.plugin = selected_plugin
+                        .and_then(|id| self.plugin_ids.iter().position(|plugin| plugin == &id))
+                        .unwrap_or(0);
                     self.history.clear();
                     self.filter.clear();
                     self.load_groups();

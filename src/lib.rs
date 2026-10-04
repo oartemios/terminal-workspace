@@ -6,27 +6,28 @@ mod bindings;
 mod config;
 pub use bindings::BindingScope;
 pub mod files;
+pub mod runtime;
 pub mod ui;
 pub use config::CONFIG_FILE;
 use serde_json::{json, Value};
 
 /// Draft source-level Plugin API; no dynamic ABI or isolation is implied.
-pub const PLUGIN_API_VERSION: &str = "0.3";
+pub const PLUGIN_API_VERSION: &str = "0.4";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyBinding {
     pub keys: String,
     pub command_id: String,
     pub scope: BindingScope,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Group {
     pub id: String,
     pub title: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub id: String,
     pub title: String,
@@ -34,14 +35,14 @@ pub struct Item {
     pub kind: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Command {
     pub id: String,
     pub title: String,
     pub requires_item: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommandInvocation {
     pub id: String,
     pub item: Option<String>,
@@ -49,7 +50,7 @@ pub struct CommandInvocation {
     pub args: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Action {
     pub label: String,
     pub command_id: String,
@@ -57,7 +58,7 @@ pub struct Action {
     pub is_default: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Block {
     pub source: String,
     pub status: String,
@@ -65,20 +66,21 @@ pub struct Block {
 }
 
 /// Location and item identifiers are opaque to Core, and interpreted by a plugin.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Navigation {
     pub group: String,
     pub location: String,
     pub selected: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandOutcome {
     Output(Block),
     Navigate(Navigation),
     WorkspaceChanged,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupView {
     pub title: String,
     pub location: String,
@@ -87,14 +89,32 @@ pub struct GroupView {
     pub command_defaults: Vec<CommandInvocation>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Permission {
     WorkspaceRead,
+    WorkspaceWrite,
+    Process,
+    Network,
+    Credentials,
+    Environment,
+}
+
+impl Permission {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        serde_json::from_value(Value::String(value.into()))
+            .map_err(|_| format!("Unknown permission: {value}"))
+    }
+    pub fn name(self) -> String {
+        format!("{self:?}")
+    }
 }
 
 pub struct Workspace {
     root: PathBuf,
     config: Value,
+    runtime_permissions: Option<BTreeSet<Permission>>,
 }
 
 impl Workspace {
@@ -106,6 +126,7 @@ impl Workspace {
         Ok(Self {
             root,
             config: config::defaults(),
+            runtime_permissions: None,
         })
     }
 
@@ -122,6 +143,13 @@ impl Workspace {
     }
 
     pub fn read_path(&self, relative: &str) -> Result<PathBuf, String> {
+        if self
+            .runtime_permissions
+            .as_ref()
+            .is_some_and(|p| !p.contains(&Permission::WorkspaceRead))
+        {
+            return Err("WorkspaceRead not granted".into());
+        }
         let path = self
             .root
             .join(relative)
@@ -132,11 +160,68 @@ impl Workspace {
         }
         Ok(path)
     }
+
+    /// Resolves a writable workspace path, including a new file in an existing directory.
+    pub fn write_path(&self, relative: &str) -> Result<PathBuf, String> {
+        if self
+            .runtime_permissions
+            .as_ref()
+            .is_some_and(|p| !p.contains(&Permission::WorkspaceWrite))
+        {
+            return Err("WorkspaceWrite not granted".into());
+        }
+        let path = Path::new(relative);
+        if path.is_absolute()
+            || path.components().any(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err("Path is outside the workspace".into());
+        }
+        let path = self.root.join(path);
+        if path.exists() {
+            let target = path.canonicalize().map_err(|e| e.to_string())?;
+            if !target.starts_with(&self.root) {
+                return Err("Path is outside the workspace".into());
+            }
+            return Ok(target);
+        }
+        let parent = path
+            .parent()
+            .ok_or("Missing parent directory")?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        if !parent.starts_with(&self.root) {
+            return Err("Path is outside the workspace".into());
+        }
+        // Dangling symlinks must not become a write outside root.
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err("Unresolved path already exists".into());
+        }
+        Ok(parent.join(path.file_name().ok_or("Missing filename")?))
+    }
 }
 
 pub trait Plugin {
-    fn id(&self) -> &'static str;
-    fn name(&self) -> &'static str;
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn start(
+        &self,
+        _workspace: &Workspace,
+        _permissions: &BTreeSet<Permission>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn stop(&self) {}
+    fn runtime_status(&self) -> runtime::RuntimeStatus {
+        runtime::RuntimeStatus::in_process()
+    }
+    fn installation_present(&self) -> bool {
+        true
+    }
     fn permissions(&self) -> Vec<Permission> {
         Vec::new()
     }
@@ -164,6 +249,9 @@ pub trait Plugin {
         '•'
     }
     fn actions(&self, item: &Item) -> Vec<Action>;
+    fn try_actions(&self, item: &Item) -> Result<Vec<Action>, String> {
+        Ok(self.actions(item))
+    }
     fn commands(&self) -> Vec<Command>;
     fn keybindings(&self) -> Vec<KeyBinding> {
         Vec::new()
@@ -178,6 +266,10 @@ pub trait Plugin {
 pub struct PluginState {
     pub id: String,
     pub status: &'static str,
+    pub installed: bool,
+    pub workspace_enabled: bool,
+    pub session_enabled: bool,
+    pub runtime: runtime::RuntimeStatus,
 }
 
 pub struct App {
@@ -195,6 +287,8 @@ pub struct App {
     declared_bindings: Vec<KeyBinding>,
     sessions: BTreeMap<PathBuf, (BTreeSet<String>, Value)>,
     previous_workspace: Option<PathBuf>,
+    package_store: Option<runtime::PackageStore>,
+    discovery_errors: Vec<String>,
 }
 
 impl App {
@@ -216,6 +310,8 @@ impl App {
             declared_bindings: bindings::core_bindings(),
             sessions: BTreeMap::new(),
             previous_workspace: None,
+            package_store: None,
+            discovery_errors: Vec::new(),
         })
     }
 
@@ -278,6 +374,134 @@ impl App {
         &self.workspace
     }
 
+    pub fn load_packages(
+        &mut self,
+        store: runtime::PackageStore,
+        enabled_defaults: &[&str],
+    ) -> Vec<String> {
+        self.package_store = Some(store.clone());
+        let removed: Vec<_> = self
+            .installed
+            .iter()
+            .filter(|(_, plugin)| {
+                !catch_unwind(AssertUnwindSafe(|| plugin.installation_present())).unwrap_or(false)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in removed {
+            self.stop_plugin(&id);
+            self.remove_registration(&id);
+        }
+        self.discovery_errors.clear();
+        match store.discover() {
+            Err(error) => self.discovery_errors.push(error),
+            Ok(packages) => {
+                for package in packages {
+                    match package {
+                        Err(error) => self.discovery_errors.push(error),
+                        Ok(plugin) => {
+                            if self.installed.contains_key(plugin.id()) {
+                                continue;
+                            }
+                            let enabled = enabled_defaults.contains(&plugin.id());
+                            if let Err(error) = self.install(Box::new(plugin), enabled) {
+                                self.discovery_errors.push(error);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.discovery_errors.clone()
+    }
+
+    pub fn install_package(&mut self, source: PathBuf) -> Result<String, String> {
+        let source = if source.is_absolute() {
+            source
+        } else {
+            self.workspace.root().join(source)
+        };
+        let manifest = runtime::Manifest::read(&source)?;
+        if self.installed.contains_key(&manifest.plugin.id) {
+            return Err(format!("Plugin already installed: {}", manifest.plugin.id));
+        }
+        let store = self
+            .package_store
+            .clone()
+            .ok_or("No global plugin store configured")?;
+        let id = store.install(&source)?;
+        let plugin = store.load(&id)?;
+        if let Err(error) = self.install(Box::new(plugin), false) {
+            let _ = store.uninstall(&id);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    pub fn uninstall(&mut self, id: &str) -> Result<(), String> {
+        self.ensure_installed(id)?;
+        let store = self
+            .package_store
+            .clone()
+            .ok_or("No global plugin store configured")?;
+        self.stop_plugin(id);
+        store.uninstall(id)?;
+        self.remove_registration(id);
+        Ok(())
+    }
+
+    fn remove_registration(&mut self, id: &str) {
+        self.installed.remove(id);
+        self.registry
+            .retain(|_, (owner, _)| owner.as_deref() != Some(id));
+        self.requested_permissions.remove(id);
+        self.granted_permissions.remove(id);
+        self.activation_defaults.remove(id);
+        self.permission_defaults.remove(id);
+        self.workspace_enabled.remove(id);
+        self.session_disabled.remove(id);
+        self.declared_bindings
+            .retain(|binding| binding.scope.plugin() != Some(id));
+        // Keep project-local settings, activation intent, and saved permissions for reinstall.
+    }
+
+    pub fn trust_plugin(&mut self, id: &str) -> Result<(), String> {
+        self.ensure_installed(id)?;
+        self.package_store
+            .as_ref()
+            .ok_or("No global plugin store configured")?
+            .trust(id)?;
+        self.stop_plugin(id);
+        Ok(())
+    }
+
+    fn stop_plugin(&self, id: &str) {
+        if let Some(plugin) = self.installed.get(id) {
+            let _ = catch_unwind(AssertUnwindSafe(|| plugin.stop()));
+        }
+    }
+
+    pub fn restart_plugin(&self, id: &str) -> Result<(), String> {
+        self.active(id)?;
+        self.stop_plugin(id);
+        self.prepared(id).map(|_| ())
+    }
+
+    fn prepared(&self, id: &str) -> Result<&dyn Plugin, String> {
+        let plugin = self.active(id)?;
+        self.check_permissions(id)?;
+        let permissions = self
+            .granted_permissions
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
+        catch_unwind(AssertUnwindSafe(|| {
+            plugin.start(&self.workspace, &permissions)
+        }))
+        .map_err(|_| format!("Plugin {id} panicked while starting"))??;
+        Ok(plugin)
+    }
+
     pub fn install(&mut self, plugin: Box<dyn Plugin>, enabled: bool) -> Result<(), String> {
         let id = plugin.id().to_owned();
         if id == "core" || id.is_empty() {
@@ -326,16 +550,14 @@ impl App {
         {
             self.workspace_enabled.insert(id.clone());
         }
-        if saved["permissions"].as_array().is_some_and(|values| {
-            values
-                .iter()
-                .any(|value| value.as_str() == Some("WorkspaceRead"))
-        }) {
-            self.granted_permissions
-                .entry(id)
-                .or_default()
-                .insert(Permission::WorkspaceRead);
-        }
+        let permissions = saved
+            .get("permissions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().and_then(|name| Permission::parse(name).ok()))
+            .collect();
+        self.granted_permissions.insert(id, permissions);
         Ok(())
     }
 
@@ -344,6 +566,7 @@ impl App {
         self.set_enabled(id, true)?;
         self.workspace_enabled.insert(id.to_owned());
         self.session_disabled.remove(id);
+        self.stop_plugin(id);
         Ok(())
     }
 
@@ -365,9 +588,9 @@ impl App {
             .unwrap_or_default();
         if !permissions
             .iter()
-            .any(|value| value.as_str() == Some("WorkspaceRead"))
+            .any(|value| value.as_str() == Some(permission.name().as_str()))
         {
-            permissions.push(json!("WorkspaceRead"));
+            permissions.push(json!(permission.name()));
         }
         plugin["permissions"] = Value::Array(permissions);
         value["plugins"][id] = plugin;
@@ -411,13 +634,14 @@ impl App {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        permissions.retain(|value| value.as_str() != Some("WorkspaceRead"));
+        permissions.retain(|value| value.as_str() != Some(permission.name().as_str()));
         plugin["permissions"] = Value::Array(permissions);
         value["plugins"][id] = plugin;
         self.save_config(value)?;
         if let Some(granted) = self.granted_permissions.get_mut(id) {
             granted.remove(&permission);
         }
+        self.stop_plugin(id);
         Ok(())
     }
 
@@ -426,11 +650,13 @@ impl App {
         self.set_enabled(id, false)?;
         self.workspace_enabled.remove(id);
         self.session_disabled.remove(id);
+        self.stop_plugin(id);
         Ok(())
     }
     pub fn disable_for_session(&mut self, id: &str) -> Result<(), String> {
         self.ensure_installed(id)?;
         self.session_disabled.insert(id.to_owned());
+        self.stop_plugin(id);
         Ok(())
     }
 
@@ -439,6 +665,18 @@ impl App {
             .keys()
             .map(|id| PluginState {
                 id: id.clone(),
+                installed: catch_unwind(AssertUnwindSafe(|| {
+                    self.installed[id].installation_present()
+                }))
+                .unwrap_or(false),
+                workspace_enabled: self.workspace_enabled.contains(id),
+                session_enabled: !self.session_disabled.contains(id),
+                runtime: catch_unwind(AssertUnwindSafe(|| self.installed[id].runtime_status()))
+                    .unwrap_or_else(|_| runtime::RuntimeStatus {
+                        availability: runtime::Availability::Failed,
+                        connection: runtime::Connection::Failed,
+                        detail: Some("Plugin failed while reporting status".into()),
+                    }),
                 status: if !self.workspace_enabled.contains(id) {
                     "workspace disabled"
                 } else if self.session_disabled.contains(id) {
@@ -472,12 +710,21 @@ impl App {
     }
 
     pub fn view(&self, id: &str, group: &str, location: Option<&str>) -> Result<GroupView, String> {
-        let plugin = self.active(id)?;
-        self.check_permissions(id)?;
-        catch_unwind(AssertUnwindSafe(|| {
+        let plugin = self.prepared(id)?;
+        let view = catch_unwind(AssertUnwindSafe(|| {
             plugin.view(&self.workspace, group, location)
         }))
-        .map_err(|_| format!("Plugin {id} failed while loading items"))?
+        .map_err(|_| format!("Plugin {id} failed while loading items"))??;
+        let mut ids = BTreeSet::new();
+        if view.items.iter().any(|item| !ids.insert(&item.id)) {
+            return Err("Duplicate Item id in plugin view".into());
+        }
+        for invocation in view.parent.iter().chain(view.command_defaults.iter()) {
+            if self.command_owner(&invocation.id) != Some(id) {
+                return Err("Plugin view must use its own registered commands".into());
+            }
+        }
+        Ok(view)
     }
 
     pub fn actions(&self, id: &str, group: &str, item_id: &str) -> Result<Vec<Action>, String> {
@@ -498,8 +745,19 @@ impl App {
             .into_iter()
             .find(|item| item.id == item_id)
             .ok_or_else(|| format!("Item not found: {item_id}"))?;
-        catch_unwind(AssertUnwindSafe(|| plugin.actions(&item)))
-            .map_err(|_| format!("Plugin {id} failed while listing actions"))
+        let actions = catch_unwind(AssertUnwindSafe(|| plugin.try_actions(&item)))
+            .map_err(|_| format!("Plugin {id} failed while listing actions"))??;
+        if actions.iter().filter(|action| action.is_default).count() > 1 {
+            return Err("Multiple default actions".into());
+        }
+        for action in &actions {
+            if action.command_id != action.invocation.id
+                || self.command_owner(&action.command_id) != Some(id)
+            {
+                return Err("Plugin action must invoke its own registered command".into());
+            }
+        }
+        Ok(actions)
     }
 
     pub fn item_icon(&self, id: &str, item: &Item) -> char {
@@ -587,13 +845,14 @@ impl App {
                     workspace.config["plugins"][id] = saved.clone();
                 }
             }
-            if saved["permissions"].as_array().is_some_and(|permissions| {
-                permissions
-                    .iter()
-                    .any(|p| p.as_str() == Some("WorkspaceRead"))
-            }) {
-                granted.insert(id.clone(), BTreeSet::from([Permission::WorkspaceRead]));
-            }
+            let permissions = saved
+                .get("permissions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().and_then(|name| Permission::parse(name).ok()))
+                .collect();
+            granted.insert(id.clone(), permissions);
         }
         if original != workspace.config {
             if let Some(store) = &mut store {
@@ -610,6 +869,9 @@ impl App {
             old_root.clone(),
             (self.session_disabled.clone(), self.workspace.config.clone()),
         );
+        for id in self.installed.keys() {
+            self.stop_plugin(id);
+        }
         self.workspace = workspace;
         self.store = store;
         self.workspace_enabled = enabled;
@@ -625,7 +887,23 @@ impl App {
             .and_then(|(owner, _)| owner.as_deref())
     }
 
-    pub fn invoke(&mut self, invocation: CommandInvocation) -> Result<CommandOutcome, String> {
+    pub fn invoke(&mut self, mut invocation: CommandInvocation) -> Result<CommandOutcome, String> {
+        // Legacy read aliases resolve to the same canonical operation and registry route.
+        if matches!(
+            invocation.id.as_str(),
+            "core.permission.grant-read" | "core.permission.revoke-read"
+        ) {
+            if invocation.args.len() != 1 {
+                return Err(format!("{} requires one plugin id", invocation.id));
+            }
+            invocation.id = if invocation.id.ends_with("grant-read") {
+                "core.permission.grant"
+            } else {
+                "core.permission.revoke"
+            }
+            .into();
+            invocation.args.push("WorkspaceRead".into());
+        }
         let (plugin_id, command) = self
             .registry
             .get(&invocation.id)
@@ -636,9 +914,8 @@ impl App {
         let Some(plugin_id) = plugin_id else {
             return self.invoke_core(invocation);
         };
-        let plugin = self.active(plugin_id)?;
-        self.check_permissions(plugin_id)?;
-        catch_unwind(AssertUnwindSafe(|| {
+        let plugin = self.prepared(plugin_id)?;
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
             plugin.execute(&self.workspace, &invocation)
         }))
         .map_err(|_| {
@@ -646,11 +923,55 @@ impl App {
                 "Plugin {plugin_id} failed while executing {}",
                 invocation.id
             )
-        })?
+        })??;
+        if matches!(outcome, CommandOutcome::WorkspaceChanged) {
+            return Err("WorkspaceChanged is reserved for Core".into());
+        }
+        Ok(outcome)
     }
 
     fn invoke_core(&mut self, invocation: CommandInvocation) -> Result<CommandOutcome, String> {
         let content = match invocation.id.as_str() {
+            "core.plugin.install" => {
+                if invocation.args.len() != 1 {
+                    return Err("core.plugin.install requires one package directory".into());
+                }
+                let id = self.install_package(PathBuf::from(&invocation.args[0]))?;
+                format!("{id}: installed; explicit trust required; activation follows saved Workspace configuration")
+            }
+            "core.plugins.discover" => {
+                if !invocation.args.is_empty() {
+                    return Err("core.plugins.discover takes no arguments".into());
+                }
+                let store = self
+                    .package_store
+                    .clone()
+                    .ok_or("No global plugin store configured")?;
+                let errors = self.load_packages(store, &[]);
+                if errors.is_empty() {
+                    "Discovery complete; no new Workspace activation defaults".into()
+                } else {
+                    errors.join("\n")
+                }
+            }
+            "core.permission.grant" | "core.permission.revoke" => {
+                if invocation.args.len() != 2 {
+                    return Err(format!(
+                        "{} requires plugin id and permission name",
+                        invocation.id
+                    ));
+                }
+                let id = &invocation.args[0];
+                self.ensure_installed(id)?;
+                let permission = Permission::parse(&invocation.args[1])?;
+                if invocation.id == "core.permission.grant" {
+                    self.grant(id, permission)?;
+                    format!("{id}: {permission:?} granted")
+                } else {
+                    self.revoke(id, permission)?;
+                    format!("{id}: {permission:?} revoked")
+                }
+            }
             "core.workspace.open" => {
                 if invocation.args.len() != 1 {
                     return Err("core.workspace.open requires one project path".into());
@@ -675,13 +996,41 @@ impl App {
                 }
                 let states = self.plugins();
                 if states.is_empty() {
-                    "No installed plugins".into()
-                } else {
-                    states
-                        .into_iter()
-                        .map(|plugin| format!("{}: {}", plugin.id, plugin.status))
+                    std::iter::once("No installed plugins".to_owned())
+                        .chain(
+                            self.discovery_errors
+                                .iter()
+                                .map(|error| format!("Discovery error: {error}")),
+                        )
                         .collect::<Vec<_>>()
                         .join("\n")
+                } else {
+                    let mut lines = states
+                        .into_iter()
+                        .map(|plugin| {
+                            format!(
+                                "{}: {}\nInstalled: {}\nWorkspace enabled: {}\nSession enabled: {}\nAvailability: {:?}\nConnection: {:?}{}\n",
+                                plugin.id,
+                                plugin.status,
+                                plugin.installed,
+                                plugin.workspace_enabled,
+                                plugin.session_enabled,
+                                plugin.runtime.availability,
+                                plugin.runtime.connection,
+                                plugin
+                                    .runtime
+                                    .detail
+                                    .map(|detail| format!("\n{detail}"))
+                                    .unwrap_or_default()
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    lines.extend(
+                        self.discovery_errors
+                            .iter()
+                            .map(|error| format!("Discovery error: {error}")),
+                    );
+                    lines.join("\n")
                 }
             }
             id => {
@@ -691,6 +1040,26 @@ impl App {
                 let plugin = &invocation.args[0];
                 self.ensure_installed(plugin)?;
                 match id {
+                    "core.plugin.untrust" => {
+                        self.package_store
+                            .as_ref()
+                            .ok_or("No global plugin store configured")?
+                            .untrust(plugin)?;
+                        self.stop_plugin(plugin);
+                        format!("{plugin}: trust revoked; process stopped")
+                    }
+                    "core.plugin.trust" => {
+                        self.trust_plugin(plugin)?;
+                        format!("{plugin}: trusted for local native execution; this runtime is not an OS sandbox")
+                    }
+                    "core.plugin.uninstall" => {
+                        self.uninstall(plugin)?;
+                        format!("{plugin}: uninstalled; Workspace settings preserved")
+                    }
+                    "core.plugin.restart" => {
+                        self.restart_plugin(plugin)?;
+                        format!("{plugin}: connected")
+                    }
                     "core.plugin.enable" => {
                         self.enable(plugin)?;
                         format!("{plugin}: enabled for Workspace and session")
@@ -703,22 +1072,27 @@ impl App {
                         self.disable_for_session(plugin)?;
                         format!("{plugin}: session disabled")
                     }
-                    "core.permission.grant-read" => {
-                        self.grant(plugin, Permission::WorkspaceRead)?;
-                        format!("{plugin}: WorkspaceRead granted")
-                    }
-                    "core.permission.revoke-read" => {
-                        self.revoke(plugin, Permission::WorkspaceRead)?;
-                        format!("{plugin}: WorkspaceRead revoked")
-                    }
-                    "core.permissions" => format!(
-                        "{plugin}\nRequested: {:?}\nGranted: {:?}",
-                        self.requested_permissions.get(plugin).unwrap(),
-                        self.granted_permissions
+                    "core.permissions" => {
+                        let requested = &self.requested_permissions[plugin];
+                        let granted = self
+                            .granted_permissions
                             .get(plugin)
                             .cloned()
-                            .unwrap_or_default()
-                    ),
+                            .unwrap_or_default();
+                        let mut lines = vec![plugin.clone()];
+                        for permission in requested.union(&granted) {
+                            lines.push(format!(
+                                "{permission:?}: requested={} granted={}",
+                                requested.contains(permission),
+                                granted.contains(permission)
+                            ));
+                        }
+                        if requested.is_empty() && granted.is_empty() {
+                            lines.push("No declared permissions".into());
+                        }
+                        lines.push("Host checks; no OS sandbox".into());
+                        lines.join("\n")
+                    }
                     _ => return Err(format!("Unknown core command: {id}")),
                 }
             }
@@ -733,6 +1107,35 @@ impl App {
 
 fn core_commands() -> Vec<Command> {
     [
+        (
+            "core.plugin.install",
+            "Install local plugin package (directory)",
+        ),
+        (
+            "core.plugins.discover",
+            "Discover globally installed plugins",
+        ),
+        (
+            "core.plugin.uninstall",
+            "Uninstall selected plugin globally",
+        ),
+        (
+            "core.plugin.trust",
+            "Trust selected plugin for native execution",
+        ),
+        (
+            "core.plugin.untrust",
+            "Revoke trust and stop selected plugin",
+        ),
+        ("core.plugin.restart", "Restart selected plugin"),
+        (
+            "core.permission.grant",
+            "Grant a declared permission (plugin name)",
+        ),
+        (
+            "core.permission.revoke",
+            "Revoke a permission (plugin name)",
+        ),
         ("core.workspace.open", "Open Workspace (project path)"),
         ("core.workspace.previous", "Switch to previous Workspace"),
         ("core.plugins", "List installed plugins and activation"),
@@ -759,4 +1162,12 @@ fn core_commands() -> Vec<Command> {
         requires_item: false,
     })
     .collect()
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        for id in self.installed.keys() {
+            self.stop_plugin(id);
+        }
+    }
 }

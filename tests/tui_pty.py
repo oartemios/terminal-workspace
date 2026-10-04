@@ -13,6 +13,7 @@ import time
 
 
 BINARY = Path(__file__).resolve().parents[1] / "target/debug/tw"
+PLUGIN_STORE = tempfile.TemporaryDirectory(prefix="tw-pty-global-plugins-")
 
 
 class Session:
@@ -24,7 +25,7 @@ class Session:
         start = time.monotonic()
         self.process = subprocess.Popen(
             [str(BINARY), workspace], stdin=self.slave, stdout=self.slave,
-            stderr=self.slave,
+            stderr=self.slave, env={**os.environ, "TW_PLUGIN_DIR": PLUGIN_STORE.name},
         )
         self.wait_for(b"Space: palette")
         self.startup_ms = (time.monotonic() - start) * 1000
@@ -157,6 +158,37 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
     finally:
         session.close()
 
+    # Uninstall and reinstall the same first-party package through the public loader.
+    # This also checks that first-run bootstrap does not undo an explicit uninstall.
+    with tempfile.TemporaryDirectory(prefix="tw-package-source-") as package_parent:
+        package = str(Path(package_parent, "Files package"))
+        env = {**os.environ, "TW_PLUGIN_DIR": PLUGIN_STORE.name}
+        subprocess.run([str(BINARY), "plugins", "package-files", package], env=env, check=True, capture_output=True)
+        subprocess.run([str(BINARY), "plugins", "uninstall", "files"], env=env, check=True, capture_output=True)
+        session = Session(workspace)
+        try:
+            assert b"No entries" in session.transcript
+            session.send(b" ", b"Command palette")
+            session.send(b"core.plugin.install\r", b":core.plugin.install ")
+            session.send(package.encode() + b"\r", b"files: installed")
+            session.send(b"\x1b", b"untrusted")
+            session.send(b":core.plugins\r", b"Availability: Untrusted")
+            session.send(b"\x1b", b"> Items")
+            session.send(b":core.plugin.trust files\r", b"trusted for local")
+            session.send(b"\x1b", b"> Items")
+            session.send("/заметка\rp".encode(), b"preview through the real terminal")
+            session.send(b"\x1b", b"> Items")
+            session.send(b",s", b"session disabled")
+            session.send(b"\x1b", b"> Items")
+            session.send(b":core.plugins\r", b"Connection: Disconnected")
+            session.send(b"\x1b", b"> Items")
+            session.send(b",e", b"enabled for Workspace and session")
+            session.send(b"\x1b", b"> Items")
+            session.exit(b"q")
+            print("Public package CLI, uninstall/bootstrap separation, palette install, trust, saved permissions and process lifecycle: passed")
+        finally:
+            session.close()
+
     with tempfile.TemporaryDirectory(prefix="tw other project ") as second:
         Path(second, "second.txt").write_text("second project preview", encoding="utf-8")
         Path(second, ".terminal-workspace.json").write_text(json.dumps({
@@ -213,8 +245,9 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
     try:
         assert b"WorkspaceRead not granted" in session.transcript
         session.send(b" ", b"Command palette")
-        session.send(b"core.permission.grant-read", b"core.permission.grant-read")
-        session.send(b"\r", b"WorkspaceRead granted")
+        session.send(b"core.permission.grant", b"core.permission.grant")
+        session.send(b"\r", b":core.permission.grant files ")
+        session.send(b"WorkspaceRead\r", b"WorkspaceRead granted")
         session.send(b"\x1b", b"> Items")
         session.send("/заметка\rp".encode(), b"preview through the real terminal")
         session.exit(b"q")

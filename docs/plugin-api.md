@@ -1,46 +1,58 @@
-# Plugin API v0.3 — draft
+# Plugin API v0.4 — draft
 
-Версия исходного Rust-контракта обозначена `PLUGIN_API_VERSION = "0.3"`. Это ранний API, связанный с Core при сборке, без стабильного ABI и без sandbox. Внешний пример находится в `examples/custom-plugin`; Files использует те же публичные контракты.
+`PLUGIN_API_VERSION = "0.4"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
 
 ## Данные и вызовы
 
-- `Plugin::items` задаёт корневые Items стабильной Group. `Plugin::view` опционально расширяет загрузку вложенными контекстами; default поддерживает только корень.
-- `GroupView` возвращает Items, заголовок, opaque `location`, опциональный родительский `CommandInvocation` и `command_defaults` для команд в текущем контексте.
-- Необязательный `Plugin::item_icon(&Item) -> char` задаёт символ типа для списка. Default — •; Core допускает только безопасный символ шириной в одну ячейку, иначе использует default. Нативный `kind` сохраняется; существующие плагины не требуют изменений.
-- `Item.id` и `Item.kind` имеют нативный смысл внутри плагина. Core не интерпретирует их как пути или фиксированную классификацию объектов.
-- `Plugin::actions` задаёт допустимые действия объекта. Максимум одно Action может иметь `is_default = true`: Enter вызывает его. `a` показывает весь список. Если default отсутствует, Enter открывает список действий.
-- `Plugin::execute` возвращает `CommandOutcome::Output(Block)` для структурированного результата или `Navigate(Navigation)` для смены контекста группы. Navigation задаёт группу, opaque location и необязательный ItemId, который следует выделить после перехода.
+- `Plugin::id/name` возвращают borrowed `&str`. Groups — стабильные области; Commands регистрируются в namespace плагина. Capabilities необязательны.
+- `items` задаёт корневые Items Group. `view` расширяет загрузку вложенными контекстами; default поддерживает только корень.
+- `GroupView` содержит Items, title, opaque location, parent invocation и command_defaults. Item id/kind имеют нативный смысл; Core не интерпретирует их как пути. ID элементов одного view уникальны.
+- `item_icon` задаёт символ списка; Core заменяет небезопасные/неодноклеточные символы на fallback.
+- `actions` задаёт действия Item; `try_actions` позволяет сообщить ошибку. Максимум одно действие default: Enter/`l` вызывает его, иначе открывает Actions. CommandId и invocation.id должны совпадать и принадлежать плагину.
+- `execute` возвращает `Output(Block)` либо `Navigate(Navigation)` с группой, opaque location и необязательным selected ItemId. `WorkspaceChanged` зарезервирован для Core.
 
-## Контекст выполнения
+`CommandInvocation.args` независим от Item. App проверяет регистрацию, activation и permissions; bindings, `:commands`, palette и Actions сходятся к одному маршруту. В TUI явный аргумент имеет приоритет, затем command_defaults view, затем выбранный Item для команды его плагина, требующей Item. Ошибка загрузки нового view сохраняет текущий контекст. Фильтр, порядок и выбор сохраняются для локации в сессии.
 
-App проверяет регистрацию команды, состояние активации и выданные разрешения. TUI формирует одинаковые вызовы из действий, палитры, `:commands` и bindings. Явный аргумент командной строки имеет приоритет; затем используются `command_defaults` текущего представления, затем выбранный Item для команды его плагина, требующей Item.
+Files нормализует пути внутри Workspace и задаёт default Action для каталогов. `files.open/parent` возвращают Navigation; `files.preview/path` — Blocks. Catalog использует те же контракты для секций и заметок без Files-специфичного пути в Core.
 
-Core загружает новый GroupView до изменения отображаемого контекста. Ошибка оставляет текущий список и показывается в statusline. Для каждой локации сохраняются фильтр, сортировка и выбранный Item; возврат восстанавливает их. Если явно запрошенное выделение скрыто фильтром, фильтр очищается, чтобы показать объект.
+## Workspace и конфигурация
 
-Workspace передаётся при каждом вызове. Плагин не должен привязывать данные или состояние к одному проекту. Проверки разрешений являются моделью доступа в текущем процессе, а не защитой от прямого обращения стороннего Rust-кода к ОС.
+`App::open` читает project-local конфигурацию; `App::new` создаёт сессию без записи. `plugin_settings(id)` возвращает JSON settings плагина. `grant_default` применяет явный default только без сохранённого решения; grant/revoke сохраняют явное решение. Повреждённая конфигурация блокирует запись до исправления и перезапуска. Unknown fields сохраняются.
 
-## Files
+При каждом вызове передаётся Workspace. Процессный контекст содержит canonical root, settings только текущего плагина и grants; UI overrides и настройки соседних плагинов не передаются. Worker завершается при переключении root. Один пакет работает с разными проектами; activation, permissions, settings и suspend независимы. `core.workspace.open` принимает путь, `core.workspace.previous` возвращает к прошлому проекту; подготовка нового проекта предшествует замене текущего.
 
-Files сам нормализует пути, проверяет их принадлежность Workspace, задаёт default Action для каталогов и родительский вызов. `files.open` и `files.parent` возвращают Navigation; `files.preview` и `files.path` возвращают Blocks. Внутренние symlinks сохраняют логическую локацию, ссылки за пределы Workspace не открываются.
+## Пакеты и lifecycle
 
-Изменения относительно первой заготовки: `execute` возвращает `CommandOutcome` вместо Block, Action получает `is_default`, а Item хранит нативный `kind` вместо Files-специфичного `is_directory`.
+`runtime::write_package` создаёт manifest и копирует executable; entrypoint worker вызывает `runtime::serve_plugin`. `PackageStore` устанавливает/обнаруживает пакеты без выполнения кода. `App::load_packages(store, defaults)` подключает обнаруженные пакеты; defaults задаются явно. Installation, Workspace/session activation, availability и connection — отдельные состояния. `App::install` с linked trait остаётся для доверенного SDK usage и тестов.
 
-## Core-команды и конфигурация (v0.2)
+API 0.4 добавляет serde DTO и hooks `start`, `stop`, `runtime_status`, `installation_present`, `try_actions`. Start должен быть идемпотентным. Процессный adapter запускает worker после trust и permissions, проверяет handshake descriptor; SDK вызывает native start перед предметными операциями. Stop worker — завершение process group и освобождение pipe/child. Native cleanup hook не гарантирован при жёстком завершении. В linked usage Core вызывает stop, но не может принудительно остановить произвольные threads.
 
-`CommandInvocation.args: Vec<String>` передаёт аргументы без выбранного доменного Item. В существующие литералы вызовов добавь `args: Vec::new()`. `App::invoke` теперь требует `&mut self`, поскольку registry выполняет также Core-команды, изменяющие активацию и разрешения. `App::disable` и `disable_for_session` возвращают `Result<(), String>`; неизвестные plugin id отклоняются. Namespace `core` зарезервирован, plugin commands по-прежнему принадлежат namespace их плагина.
+Отказ обычной операции сохраняет соединение; transport fault завершает worker, показывает failed и требует явного restart/enable. Limits и deadline описаны в protocol. Runtime пока синхронный, не обеспечивает неблокирующую навигацию при медленной операции.
 
-`App::open` читает и сохраняет конфигурацию проекта; `App::new` создаёт сессию без записи на диск. `Workspace::plugin_settings(id)` возвращает необязательный JSON-объект, который интерпретирует плагин; `Workspace::overrides` предоставляет сохранённые overrides. `App::configuration_error` сообщает ошибку чтения. `grant_default` применяет явный default приложения только без сохранённого решения о разрешениях; обычный `grant` — явная выдача, `revoke` — сохраняемый отзыв.
+## Permissions и trust
 
-Core-команды `core.plugins`, `core.plugin.enable/disable/suspend`, `core.permissions`, `core.permission.grant-read/revoke-read` используют тот же registry, что Files и custom plugin. Все, кроме `core.plugins`, принимают один plugin id в args. В TUI palette/binding/Action цель задаёт выбранная вкладка плагина; Item для них не нужен. После отключения или отзыва UI очищает данные текущего представления; плагин и его settings остаются установлены и доступны для включения.
+Категории: `WorkspaceRead`, `WorkspaceWrite`, `Process`, `Network`, `Credentials`, `Environment`. Host требует все объявленные permissions до запуска и предметных вызовов. Недоверенный пакет не выполняется до отдельного trust. Отзыв permissions/trust, suspend, disable, uninstall и Drop App завершают worker текущего приложения.
 
-## Переключение Workspace и bindings (v0.3)
+Host очищает environment; передаёт только manifest allowlists при соответствующих grants. Credentials здесь — named environment forwarding, без keychain/vault и записи значений в project-local JSON. Runtime `Workspace.read_path/write_path` проверяет grants и принадлежность корню, включая symlink escape. Эти helpers не защищают от filesystem races.
 
-`Plugin::keybindings` имеет default `Vec::new()`. `KeyBinding { keys, command_id, scope }` объявляет локальную последовательность; `BindingScope::Plugin(String)`, `Group { plugin, group }` и `View { plugin, group, location }` задают область её действия. Идентификаторы group/location остаются opaque. Плагин может объявлять только свои зарегистрированные CommandId и свой namespace. Files и внешне упакованный Catalog используют один контракт.
+**OS sandbox отсутствует.** Trusted native executable сохраняет права пользователя и может обращаться к ОС напрямую, обходя SDK и неполную декларацию permissions. Process/Network grants — host gates, не syscall enforcement. Подробнее: [решение runtime](decisions/0006-executable-plugin-runtime.md).
 
-App предоставляет `keybindings(plugin, group, location)` и `binding_diagnostics()`. Global bindings принадлежат Core. Project-local overrides имеют приоритет перед defaults; неоднозначные последовательности отключаются с диагностикой. Поддерживаются только печатные символы без пробелов; зарезервированные клавиши, JSON-схема и правила приоритета описаны в [решении реализации](decisions/0004-workspace-switching-and-bindings.md).
+## Core-команды
 
-`core.workspace.open` принимает один путь в args, `core.workspace.previous` — ни одного. `App::switch_workspace` загружает новый проект до замены текущего, сохраняя установленные реализации и registry. Относительный путь считается от текущего корня. Разрешения и settings не переносятся; suspend отдельно сохраняется для каждого проекта в пределах сессии. Defaults из `install(..., enabled)` и явно вызванного `grant_default` применяются к новому проекту только при отсутствии сохранённого решения.
+Все выполняются через CommandRegistry:
 
-`CommandOutcome::WorkspaceChanged` — новый вариант enum, возвращаемый Core после успешного переключения. Обнови exhaustive matches на CommandOutcome. Это смена контекста, не доменный Item и не Block. UI снимает старые результаты и загружает представления через тот же Plugin API с новым Workspace. Плагин получает Workspace при каждом вызове и не должен хранить project-specific данные без разделения по контексту. Lifecycle hooks и runtime isolation остаются вне текущего API.
+- `core.plugins`, `core.plugins.discover` — статус и повторный discovery.
+- `core.plugin.install <package-dir>`, `uninstall <id>` — установка и отдельное удаление; настройки проекта сохраняются.
+- `core.plugin.trust/untrust/restart <id>` — trust и повторный запуск.
+- `core.plugin.enable/disable/suspend <id>` — Workspace/session activation.
+- `core.permissions <id>`, `core.permission.grant/revoke <id> <Permission>` — grants. Старые grant-read/revoke-read нормализуются к общему маршруту WorkspaceRead.
 
-Defaults не являются фиксированным контрактом Plugin API. [Итерация 2.1](decisions/0005-keyboard-defaults.md) оставляет Files `p` → `files.preview`, Catalog — `p` → `catalog.read` в View Introduction. Открытие/default Action и parent invocation вызываются общей навигацией Core; публичный API v0.3 и прежние CommandId не меняются. Удалённые defaults можно явно восстановить через project-local overrides.
+В palette/bindings/Actions цель задаёт текущая вкладка без Item. Явный plugin id имеет приоритет. При недостатке аргументов TUI открывает command prompt для пути или Permission. Uninstall не равен disable; discovery не активирует custom plugin автоматически.
+
+## Bindings
+
+`Plugin::keybindings` default — пустой список. `KeyBinding { keys, command_id, scope }` использует Plugin, Group или View scope собственного namespace. Global bindings принадлежат Core. Overrides приоритетнее defaults; конфликты отключаются с диагностикой. Поддерживаются печатные символы без пробелов. Правила: [решение этапа 2](decisions/0004-workspace-switching-and-bindings.md).
+
+Defaults остаются изменяемыми: Files — локальный `p` для preview; Catalog — `p` для Read note только в Introduction. Открытие и parent используют общую грамматику `h/j/k/l`, Enter и Backspace. [Итерация 2.1](decisions/0005-keyboard-defaults.md) описывает раскладку; ранее удалённые aliases можно вернуть overrides.
+
+Изменения относительно 0.3: сериализуемые DTO, дополнительные permissions, lifecycle/status hooks, borrowed id/name, процессный SDK и фактическая установка пакета без пересборки host. Внешний контракт остаётся draft; events, фоновые задачи и refresh strategies появятся отдельно.
