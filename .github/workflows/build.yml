@@ -58,8 +58,12 @@ jobs:
         run: python3 scripts/version.py
       - name: Test versioning rules
         run: python3 tests/versioning.py
-      - name: Initialize system Git
-        run: /usr/bin/git --version
+      - name: Initialize system test tools
+        run: |
+          /usr/bin/git --version
+          # Runtime fixtures use /usr/bin/python3 with a 5 s handshake deadline.
+          # Initialize the OS Python before the first process fixture on cold VMs.
+          /usr/bin/python3 -c 'import json, os, pathlib, subprocess, sys, time; print(sys.version)'
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
