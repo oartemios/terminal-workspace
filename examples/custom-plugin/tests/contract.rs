@@ -4,7 +4,7 @@ use tw_example_catalog::CatalogPlugin;
 
 #[test]
 fn same_custom_plugin_uses_two_workspace_contexts() {
-    assert_eq!(PLUGIN_API_VERSION, "0.4");
+    assert_eq!(PLUGIN_API_VERSION, "0.5");
     for root in [std::env::current_dir().unwrap(), std::env::temp_dir()] {
         let mut app = App::new(root).unwrap();
         app.install(Box::new(CatalogPlugin), true).unwrap();
@@ -35,6 +35,7 @@ fn same_custom_plugin_uses_two_workspace_contexts() {
             panic!("Expected output");
         };
         assert_eq!(block.content, expected);
+        assert_eq!(block.format, terminal_workspace::ContentFormat::Markdown);
         let mut ui = Ui::new(app);
         ui.handle(Key::Enter);
         assert!(strip_ansi_codes(&ui.render(120, 24)).contains("Welcome note"));
@@ -178,8 +179,8 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
     let first = base.join("first project");
     let second = base.join("second project");
     for (root, greeting, enabled) in [
-        (&first, "First runtime greeting", false),
-        (&second, "Second runtime greeting", true),
+        (&first, "# First runtime greeting", false),
+        (&second, "# Second runtime greeting", true),
     ] {
         std::fs::create_dir(root).unwrap();
         std::fs::write(root.join(terminal_workspace::CONFIG_FILE),serde_json::json!({"version":1,"plugins":{"catalog":{"enabled":enabled,"settings":{"greeting":greeting}}},"overrides":{}}).to_string()).unwrap();
@@ -241,6 +242,15 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
             "route {route}: {}",
             frame(&ui)
         );
+        assert!(!frame(&ui).contains("# First runtime greeting"));
+        text(&mut ui, "v");
+        assert!(frame(&ui).contains("# First runtime greeting"));
+        text(&mut ui, "v");
+        text(&mut ui, "/First runtime greeting");
+        ui.handle(Key::Enter);
+        assert!(frame(&ui).contains("match 1/1"));
+        command(&mut ui, "1");
+        assert!(frame(&ui).contains("First runtime greeting"));
         ui.handle(Key::Escape);
     }
     command(
@@ -249,6 +259,7 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
     );
     text(&mut ui, "lp");
     assert!(frame(&ui).contains("Second runtime greeting"));
+    assert!(!frame(&ui).contains("# Second runtime greeting"));
     ui.handle(Key::Escape);
     text(&mut ui, ",b");
     text(&mut ui, "p");

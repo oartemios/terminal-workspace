@@ -7,6 +7,9 @@ use std::path::{Component, Path, PathBuf};
 
 pub struct FilesPlugin;
 
+// Leave room for JSON escaping within the executable protocol's 1 MiB response.
+const MAX_PREVIEW_BYTES: u64 = 128 * 1024;
+
 impl Plugin for FilesPlugin {
     fn id(&self) -> &'static str {
         "files"
@@ -204,14 +207,30 @@ impl Plugin for FilesPlugin {
                 let mut bytes = Vec::new();
                 std::fs::File::open(&path)
                     .map_err(|error| error.to_string())?
-                    .take(8192)
+                    .take(MAX_PREVIEW_BYTES + 1)
                     .read_to_end(&mut bytes)
                     .map_err(|error| error.to_string())?;
+                if bytes.len() as u64 > MAX_PREVIEW_BYTES {
+                    return Err(
+                        "File exceeds 128 KiB preview limit; content was not truncated".into(),
+                    );
+                }
                 String::from_utf8_lossy(&bytes).into_owned()
             }
             _ => return Err(format!("Unknown Files command: {}", invocation.id)),
         };
         Ok(CommandOutcome::Output(Block {
+            format: if invocation.id == "files.preview"
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown")
+                    }) {
+                crate::ContentFormat::Markdown
+            } else {
+                crate::ContentFormat::Text
+            },
             source: "Files".into(),
             status: "ok".into(),
             content,

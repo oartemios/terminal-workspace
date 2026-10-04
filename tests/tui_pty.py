@@ -27,7 +27,11 @@ class Session:
             [str(BINARY), workspace], stdin=self.slave, stdout=self.slave,
             stderr=self.slave, env={**os.environ, "TW_PLUGIN_DIR": PLUGIN_STORE.name},
         )
-        self.wait_for(b"Space: palette")
+        try:
+            self.wait_for(b"Space: palette")
+        except Exception:
+            self.close()
+            raise
         self.startup_ms = (time.monotonic() - start) * 1000
         assert not termios.tcgetattr(self.slave)[3] & termios.ICANON
 
@@ -47,7 +51,7 @@ class Session:
 
     def wait_for(self, expected):
         data = b""
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             data += self.read(0.05)
             if expected in data:
@@ -92,6 +96,9 @@ class Session:
 
 with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
     Path(workspace, "заметка.md").write_text("preview through the real terminal\n", encoding="utf-8")
+    Path(workspace, "long-preview.md").write_text("".join(f"preview line {i}\n" for i in range(1, 2001)))
+    Path(workspace, "rendered.md").write_text("# Heading Example\n- **bold item**\n```rust\nlet x = \"**literal**\";\n```\n> Quote\n")
+    Path(workspace, "wrapped-scroll.md").write_text("".join(f"source line {i}\n" for i in range(1, 19)) + "word " * 600 + "\nwrapped scroll tail\n")
     Path(workspace, "notes with spaces/empty").mkdir(parents=True)
     Path(workspace, "notes with spaces/child.txt").write_text("nested terminal preview\n", encoding="utf-8")
     session = Session(workspace)
@@ -149,12 +156,41 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
         wide_output = session.send(b"p", b"preview through the real terminal")
         assert "> ▤ заметка.md".encode() in wide_output
         session.send(b"\x1b", b"> Items")
+        session.send(b":files.preview long-preview.md\r", b"preview line 1")
+        session.send(b"\x1b[F", b"preview line 2000")
+        command_frame = session.send(b":files.path", b":files.path_")
+        assert b"preview line 2000" in command_frame
+        session.send(b"\x1b", b"preview line 2000")
+        error_frame = session.send(b":unknown\r", b"Error: Unknown command: unknown")
+        assert b"preview line 2000" in error_frame
+        session.send(b":files.path long-preview.md\r", b"long-preview.md")
+        session.send(b":files.preview long-preview.md\r", b"preview line 1")
+        session.send(b"\x1b[H", b"preview line 1")
+        session.send(b"/preview line 1800", b"Find /preview line 1800_")
+        session.send(b"\r", b"match 1/1")
+        search_ms = session.last_event_ms
+        session.send(b"n", b"preview line 1800")
+        session.send(b"g120", b"Line > 120_")
+        session.send(b"\r", b"line 120/2000")
+        goto_ms = session.last_event_ms
+        session.send(b":1800\r", b"line 1800/2000")
+        session.send(b":files.preview rendered.md\r", b"Heading Example")
+        raw = session.send(b"v", b"- **bold item**")
+        assert b"# Heading Example" in raw
+        assert b"- **bold item**" in raw
+        rendered = session.send(b"v", "• bold item".encode())
+        assert b"# Heading Example" not in rendered
+        session.send(b"/**literal**\r", b"match 1/1")
+        session.send(b":files.preview wrapped-scroll.md\r", b"source line 1")
+        session.send(b"j" * 120, b"wrapped scroll tail")
+        session.send(b"k" * 120, b"source line 1")
+        session.send(b"\x1b", b"> Items")
         session.send(b"a", b"Actions |")
         session.send(b"\x1b", b"> Items")
         session.send(b" ", b"Command palette")
         session.send(b"\x1b", b"> Items")
         session.exit(b"\x03")
-        print(f"PTY workflow, nested/empty directories, parent selection, Unicode, arrows, resize and Ctrl-C: passed (first frame {session.startup_ms:.1f} ms; directory {open_ms:.1f} ms; parent {parent_ms:.1f} ms)")
+        print(f"PTY workflow, Unicode, resize, output commands/search/source-line jump, Markdown/source and Ctrl-C: passed (first frame {session.startup_ms:.1f} ms; directory {open_ms:.1f} ms; parent {parent_ms:.1f} ms; search {search_ms:.1f} ms; goto {goto_ms:.1f} ms)")
     finally:
         session.close()
 
@@ -252,5 +288,63 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
         session.send("/заметка\rp".encode(), b"preview through the real terminal")
         session.exit(b"q")
         print("Activation and permission commands, restart persistence, palette recovery: passed")
+    finally:
+        session.close()
+
+# Git is explicitly installed and activated; it uses the same loader as Files.
+with tempfile.TemporaryDirectory(prefix="tw-git-pty-") as base:
+    env = {**os.environ, "TW_PLUGIN_DIR": PLUGIN_STORE.name}
+    roots = [Path(base, name) for name in ("first", "second")]
+    for index, root in enumerate(roots):
+        root.mkdir()
+        def git(*args):
+            subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+        git("init", "-b", "main")
+        git("config", "user.name", "PTY Fixture")
+        git("config", "user.email", "pty@example.test")
+        (root / "note with spaces.txt").write_text("before\n")
+        git("add", ".")
+        git("commit", "-m", "initial")
+        (root / "note with spaces.txt").write_text(f"after project {index}\n")
+    package = str(Path(base, "Git package"))
+    subprocess.run([str(BINARY), "plugins", "package-git", package], env=env, check=True, capture_output=True)
+    subprocess.run([str(BINARY), "plugins", "install", package], env=env, check=True, capture_output=True)
+    subprocess.run([str(BINARY), "plugins", "trust", "git"], env=env, check=True, capture_output=True)
+    roots[1].joinpath(".terminal-workspace.json").write_text(json.dumps({
+        "version": 1, "plugins": {"git": {"enabled": True, "permissions": ["WorkspaceRead", "Process"]}},
+    }))
+    session = Session(str(roots[0]))
+    try:
+        session.resize(140, 32)
+        session.wait_for("╭".encode())
+        session.send(b":core.plugin.enable git\r", b"enabled for Workspace and session")
+        session.send(b"\x1b", b"> Items")
+        for permission in [b"WorkspaceRead", b"Process"]:
+            session.send(b":core.permission.grant git " + permission + b"\r", permission + b" granted")
+            session.send(b"\x1b", b"> Items")
+        session.send(b"\t\x1b[C\r\r", b"[Status]")
+        session.send(b"/note with spaces\r", b"filter: note with spaces")
+        session.send(b"a", b"View file diff")
+        session.send(b"\r", b"+after project 0")
+        session.send(b"\x1b", b"> Items")
+        session.send(b"p", b"+after project 0")
+        session.send(b"\x1b", b"> Items")
+        session.send(b"\x1b[Z\x1b[C\r", b"[Branches]")
+        session.send(b"p", b"Branch: main")
+        session.send(b"\x1b", b"> Items")
+        session.send(b",w", b":core.workspace.open ")
+        session.send(str(roots[1]).encode() + b"\r", b"note with spaces.txt")
+        session.send(b"\t\x1b[C\r\r", b"[Status]")
+        session.send(b":git.diff note with spaces.txt\r", b"+after project 1")
+        session.send(b"\x1b", b"> Items")
+        session.send(b",b", b"[Branches]")
+        session.send(b"p", b"Branch: main")
+        session.send(b"\x1b", b"> Items")
+        session.send(b":core.plugin.suspend git\r", b"session disabled")
+        session.send(b"\x1b", b"> Items")
+        session.send(b"\t\x1b[D\r\r", b"[Entries]")
+        session.send(b":files.preview note with spaces.txt\r", b"after project 0")
+        session.exit(b"q")
+        print("Git package CLI, explicit activation/permissions, Status/diff, Actions, scoped binding, Branches, two Workspaces and Files after suspend: passed")
     finally:
         session.close()

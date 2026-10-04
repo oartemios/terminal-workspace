@@ -1,10 +1,17 @@
 use crate::{
     Action, App, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView, Item,
-    KeyBinding, Navigation,
+    KeyBinding, Navigation, ViewRequest,
 };
 use console::{truncate_str, Key};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
+
+struct OutputLayout {
+    key: (usize, usize, crate::ContentFormat, bool, usize),
+    rows: Rc<Vec<crate::viewer::Line>>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -41,6 +48,8 @@ enum Mode {
         selected: usize,
     },
     Command(String),
+    OutputSearch(String),
+    GoToLine(String),
     Search {
         previous: String,
     },
@@ -77,6 +86,9 @@ const HELP: &[&str] = &[
     "a on Plugins   activation and permission actions",
     ", w   open Workspace; , b   previous Workspace",
     "PgUp/PgDn, Home/End   scroll list or output",
+    "Output: / find text; n/N next/previous matching line",
+    "Output: g enter source line; :120 go to source line 120",
+    "Output: v toggle Markdown/source; : commands",
     "Esc   back; q / Ctrl-C / Ctrl-D   quit",
 ];
 
@@ -113,6 +125,7 @@ pub struct Ui {
     commands: Vec<Command>,
     focus: Focus,
     mode: Mode,
+    input_return: Option<Mode>,
     filter: String,
     sort: Sort,
     pending: String,
@@ -123,6 +136,11 @@ pub struct Ui {
     page_size: usize,
     list_page_size: usize,
     output_item: Option<String>,
+    output_query: String,
+    output_cursor: Option<usize>,
+    output_raw: bool,
+    size: (usize, usize),
+    output_layout: RefCell<Option<OutputLayout>>,
 }
 
 impl Ui {
@@ -155,6 +173,7 @@ impl Ui {
             commands,
             focus: Focus::Items,
             mode: Mode::Normal,
+            input_return: None,
             filter: String::new(),
             sort: Sort::Plugin,
             pending: String::new(),
@@ -165,6 +184,11 @@ impl Ui {
             page_size: 18,
             list_page_size: 18,
             output_item: None,
+            output_query: String::new(),
+            output_cursor: None,
+            output_raw: false,
+            size: (100, 24),
+            output_layout: RefCell::new(None),
         };
         ui.load_groups();
         ui.update_bindings();
@@ -178,7 +202,253 @@ impl Ui {
         self.message = message;
     }
 
+    fn content_mode(&self) -> &Mode {
+        if matches!(
+            self.mode,
+            Mode::Command(_) | Mode::OutputSearch(_) | Mode::GoToLine(_)
+        ) {
+            self.input_return.as_ref().unwrap_or(&self.mode)
+        } else {
+            &self.mode
+        }
+    }
+
+    fn cancel_command(&mut self) {
+        self.mode = self.input_return.take().unwrap_or(Mode::Normal);
+    }
+
+    fn output_rows(
+        &self,
+        block: &Block,
+        (width, height): (usize, usize),
+    ) -> Rc<Vec<crate::viewer::Line>> {
+        let content_width = if width >= 90 && height >= 16 {
+            let available = width - 1;
+            let left = (available * 44 / 100).max(32);
+            let right = available - left - 1;
+            let prefix = if height >= 24 {
+                block.content.lines().count().to_string().len().max(3) + 3
+            } else {
+                0
+            };
+            right.saturating_sub(4 + prefix)
+        } else {
+            width.saturating_sub(3)
+        };
+        let key = (
+            block.content.as_ptr() as usize,
+            block.content.len(),
+            block.format,
+            self.output_raw,
+            content_width,
+        );
+        {
+            let cached = self.output_layout.borrow();
+            if let Some(cached) = cached.as_ref().filter(|cached| cached.key == key) {
+                return Rc::clone(&cached.rows);
+            }
+        }
+        let rows = Rc::new(crate::viewer::layout(block, self.output_raw, content_width));
+        *self.output_layout.borrow_mut() = Some(OutputLayout {
+            key,
+            rows: Rc::clone(&rows),
+        });
+        rows
+    }
+
+    fn output_content(
+        &self,
+        block: &Block,
+        offset: usize,
+        size: (usize, usize),
+    ) -> (String, Vec<String>, Option<usize>) {
+        let rows = self.output_rows(block, size);
+        let source = rows.get(offset).map_or(0, |row| row.source);
+        (
+            format!(
+                "Output | {} | {} | line {}/{}{}",
+                block.source,
+                block.status,
+                if rows.is_empty() { 0 } else { source + 1 },
+                block.content.lines().count(),
+                if block.format == crate::ContentFormat::Markdown {
+                    if self.output_raw {
+                        " | source"
+                    } else {
+                        " | Markdown"
+                    }
+                } else {
+                    ""
+                }
+            ),
+            rows.iter()
+                .skip(offset)
+                .take(viewport_rows(size.0, size.1))
+                .map(|row| row.text.clone())
+                .collect(),
+            None,
+        )
+    }
+
+    fn output_style(&self, line: Option<&crate::viewer::Line>) -> &'static str {
+        if let Some(line) = line {
+            if self.output_cursor == Some(line.source) {
+                return SELECTED;
+            }
+            return match line.kind {
+                crate::viewer::LineKind::Heading => TITLE,
+                crate::viewer::LineKind::Code => ACCENT,
+                crate::viewer::LineKind::Quote | crate::viewer::LineKind::Rule => MUTED,
+                crate::viewer::LineKind::Text => TEXT,
+            };
+        }
+        TEXT
+    }
+
+    fn apply_view_request(&mut self, request: ViewRequest) {
+        let current = self
+            .input_return
+            .take()
+            .unwrap_or_else(|| std::mem::replace(&mut self.mode, Mode::Normal));
+        let Mode::Output { block, mut offset } = current else {
+            self.mode = current;
+            self.message = "View command requires an open output".into();
+            return;
+        };
+        self.message.clear();
+        let rows = self.output_rows(&block, self.size);
+        let current_source = self
+            .output_cursor
+            .or_else(|| rows.get(offset).map(|row| row.source))
+            .unwrap_or(0);
+        let mut target = None;
+        let search_target = matches!(
+            request,
+            ViewRequest::Find(Some(_)) | ViewRequest::NextMatch { .. }
+        );
+        match request {
+            ViewRequest::Find(None) => {
+                self.input_return = Some(Mode::Output { block, offset });
+                self.mode = Mode::OutputSearch(String::new());
+                return;
+            }
+            ViewRequest::GoToLine(None) => {
+                self.input_return = Some(Mode::Output { block, offset });
+                self.mode = Mode::GoToLine(String::new());
+                return;
+            }
+            ViewRequest::Find(Some(query)) => {
+                self.output_query = query;
+                self.output_cursor = None;
+                if !self.output_query.is_empty() {
+                    let matches: Vec<_> = block
+                        .content
+                        .lines()
+                        .enumerate()
+                        .filter_map(|(index, line)| {
+                            line.contains(&self.output_query).then_some(index)
+                        })
+                        .collect();
+                    target = matches
+                        .iter()
+                        .copied()
+                        .find(|line| *line >= current_source)
+                        .or_else(|| matches.first().copied());
+                    if target.is_none() {
+                        self.message = format!("No match: {}", self.output_query);
+                    }
+                }
+            }
+            ViewRequest::NextMatch { backwards } => {
+                if self.output_query.is_empty() {
+                    self.message = "Enter a search with / first".into();
+                } else {
+                    let matches: Vec<_> = block
+                        .content
+                        .lines()
+                        .enumerate()
+                        .filter_map(|(index, line)| {
+                            line.contains(&self.output_query).then_some(index)
+                        })
+                        .collect();
+                    target = if backwards {
+                        matches
+                            .iter()
+                            .rev()
+                            .copied()
+                            .find(|line| *line < current_source)
+                            .or_else(|| matches.last().copied())
+                    } else {
+                        matches
+                            .iter()
+                            .copied()
+                            .find(|line| *line > current_source)
+                            .or_else(|| matches.first().copied())
+                    };
+                    if target.is_none() {
+                        self.message = format!("No match: {}", self.output_query);
+                    }
+                }
+            }
+            ViewRequest::GoToLine(Some(line)) => {
+                let count = block.content.lines().count();
+                if count == 0 {
+                    self.message = "Viewed output is empty".into();
+                } else if line > count {
+                    self.message = format!("Line {line} is outside 1..{count}");
+                } else {
+                    target = Some(line - 1);
+                }
+            }
+            ViewRequest::ToggleSource => {
+                self.output_raw = !self.output_raw;
+                let new_rows = self.output_rows(&block, self.size);
+                offset = new_rows
+                    .iter()
+                    .position(|row| row.source == current_source)
+                    .unwrap_or(0)
+                    .min(new_rows.len().saturating_sub(self.page_size));
+            }
+        }
+        if let Some(source) = target {
+            self.output_cursor = Some(source);
+            offset = rows
+                .iter()
+                .position(|row| {
+                    search_target && row.source == source && row.text.contains(&self.output_query)
+                })
+                .or_else(|| rows.iter().position(|row| row.source == source))
+                .unwrap_or(0)
+                .min(rows.len().saturating_sub(self.page_size));
+        }
+        self.mode = Mode::Output { block, offset };
+    }
+
+    fn output_search_status(&self) -> String {
+        if let Mode::Output { block, .. } = self.content_mode() {
+            let matches: Vec<_> = block
+                .content
+                .lines()
+                .enumerate()
+                .filter_map(|(index, line)| line.contains(&self.output_query).then_some(index))
+                .collect();
+            let current = self
+                .output_cursor
+                .and_then(|source| matches.iter().position(|line| *line == source))
+                .map_or(0, |index| index + 1);
+            format!(
+                "Find /{} | match {}/{} | n/N next/previous",
+                self.output_query,
+                current,
+                matches.len()
+            )
+        } else {
+            String::new()
+        }
+    }
+
     pub fn resize(&mut self, height: usize) {
+        self.size.1 = height;
         self.page_size = height.saturating_sub(6).max(1);
         self.list_page_size = self.page_size;
     }
@@ -186,6 +456,32 @@ impl Ui {
     pub fn resize_to(&mut self, width: usize, height: usize) {
         self.page_size = viewport_rows(width, height);
         self.list_page_size = self.page_size;
+        if self.size == (width, height) {
+            return;
+        }
+        let source = match self.content_mode() {
+            Mode::Output { block, offset } => self
+                .output_rows(block, self.size)
+                .get(*offset)
+                .map(|row| row.source),
+            _ => None,
+        };
+        self.size = (width, height);
+        if let Some(source) = source {
+            let new_offset = match self.content_mode() {
+                Mode::Output { block, .. } => self
+                    .output_rows(block, self.size)
+                    .iter()
+                    .position(|row| row.source == source)
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            if let Mode::Output { offset, .. } =
+                self.input_return.as_mut().unwrap_or(&mut self.mode)
+            {
+                *offset = new_offset;
+            }
+        }
     }
 
     fn plugin_id(&self) -> Option<&str> {
@@ -482,6 +778,13 @@ impl Ui {
     }
 
     fn invocation(&self, id: String, explicit_item: Option<String>) -> CommandInvocation {
+        if id.starts_with("core.view.") {
+            return CommandInvocation {
+                id,
+                item: None,
+                args: explicit_item.into_iter().collect(),
+            };
+        }
         if id.starts_with("core.") {
             if matches!(
                 id.as_str(),
@@ -595,6 +898,7 @@ impl Ui {
         let output_item = invocation.item.clone();
         match self.app.invoke(invocation) {
             Ok(CommandOutcome::WorkspaceChanged) => {
+                self.input_return = None;
                 if let Some((root, state)) = previous {
                     self.workspaces.insert(root, state);
                 }
@@ -602,6 +906,7 @@ impl Ui {
                 self.restore_workspace();
             }
             Ok(CommandOutcome::Output(block)) => {
+                self.input_return = None;
                 if changes_state {
                     let selected_plugin = self.plugin_id().map(str::to_owned);
                     self.plugin_ids = self
@@ -621,9 +926,15 @@ impl Ui {
                     self.message.clear();
                 }
                 self.output_item = output_item;
+                self.output_query.clear();
+                self.output_cursor = None;
+                self.output_raw = false;
+                *self.output_layout.borrow_mut() = None;
                 self.mode = Mode::Output { block, offset: 0 };
             }
+            Ok(CommandOutcome::View(request)) => self.apply_view_request(request),
             Ok(CommandOutcome::Navigate(navigation)) => {
+                self.input_return = None;
                 self.mode = Mode::Normal;
                 match self.open_location(owner.as_deref().unwrap_or(""), navigation) {
                     Ok(()) => self.message.clear(),
@@ -632,7 +943,7 @@ impl Ui {
             }
             Err(error) => {
                 self.message = error;
-                self.mode = Mode::Normal;
+                self.cancel_command();
             }
         }
     }
@@ -747,6 +1058,7 @@ impl Ui {
             return false;
         }
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        let searching = matches!(mode, Mode::OutputSearch(_));
         match mode {
             Mode::Normal => {
                 if !self.pending.is_empty()
@@ -874,10 +1186,15 @@ impl Ui {
                 mut selected,
             } => {
                 match key {
-                    Key::Escape => return true,
+                    Key::Escape => {
+                        self.cancel_command();
+                        return true;
+                    }
                     Key::Enter => {
                         if let Some(command) = self.palette_commands(&query).get(selected) {
                             self.execute(self.invocation(command.id.clone(), None));
+                        } else {
+                            self.cancel_command();
                         }
                         return true;
                     }
@@ -903,7 +1220,10 @@ impl Ui {
             }
             Mode::Command(mut input) => {
                 match key {
-                    Key::Escape => return true,
+                    Key::Escape => {
+                        self.cancel_command();
+                        return true;
+                    }
                     Key::Enter => {
                         let input = input.trim();
                         if !input.is_empty() {
@@ -918,7 +1238,15 @@ impl Ui {
                                         },
                                     )
                                 });
-                            self.execute(self.invocation(id.into(), item));
+                            if id.chars().all(|c| c.is_ascii_digit()) && item.is_none() {
+                                self.execute(
+                                    self.invocation("core.view.goto".into(), Some(id.into())),
+                                );
+                            } else {
+                                self.execute(self.invocation(id.into(), item));
+                            }
+                        } else {
+                            self.cancel_command();
                         }
                         return true;
                     }
@@ -929,6 +1257,41 @@ impl Ui {
                     _ => {}
                 }
                 self.mode = Mode::Command(input);
+            }
+            Mode::OutputSearch(mut input) | Mode::GoToLine(mut input) => {
+                match key {
+                    Key::Escape => {
+                        self.cancel_command();
+                        return true;
+                    }
+                    Key::Enter => {
+                        if !searching && input.trim().is_empty() {
+                            self.cancel_command();
+                        } else {
+                            self.execute(CommandInvocation {
+                                id: if searching {
+                                    "core.view.find"
+                                } else {
+                                    "core.view.goto"
+                                }
+                                .into(),
+                                item: None,
+                                args: vec![input],
+                            });
+                        }
+                        return true;
+                    }
+                    Key::Backspace => {
+                        input.pop();
+                    }
+                    Key::Char(c) if !c.is_control() => input.push(c),
+                    _ => {}
+                }
+                self.mode = if searching {
+                    Mode::OutputSearch(input)
+                } else {
+                    Mode::GoToLine(input)
+                };
             }
             Mode::Search { previous } => {
                 match key {
@@ -951,8 +1314,40 @@ impl Ui {
                 self.mode = Mode::Search { previous };
             }
             Mode::Output { block, mut offset } => {
-                let max_offset = block.content.lines().count().saturating_sub(self.page_size);
+                let max_offset = self
+                    .output_rows(&block, self.size)
+                    .len()
+                    .saturating_sub(self.page_size);
                 match key {
+                    Key::Char(' ') => {
+                        self.input_return = Some(Mode::Output { block, offset });
+                        self.mode = Mode::Palette {
+                            query: String::new(),
+                            selected: 0,
+                        };
+                        return true;
+                    }
+                    Key::Char(':') => {
+                        self.input_return = Some(Mode::Output { block, offset });
+                        self.mode = Mode::Command(String::new());
+                        return true;
+                    }
+                    Key::Char('/' | 'g' | 'n' | 'N' | 'v') => {
+                        let id = match key {
+                            Key::Char('/') => "core.view.find",
+                            Key::Char('g') => "core.view.goto",
+                            Key::Char('n') => "core.view.next",
+                            Key::Char('N') => "core.view.previous",
+                            _ => "core.view.source",
+                        };
+                        self.mode = Mode::Output { block, offset };
+                        self.execute(CommandInvocation {
+                            id: id.into(),
+                            item: None,
+                            args: Vec::new(),
+                        });
+                        return true;
+                    }
                     Key::Escape | Key::Enter => return true,
                     Key::Char('q') => return false,
                     Key::ArrowUp | Key::Char('k') => offset = offset.saturating_sub(1),
@@ -965,11 +1360,17 @@ impl Ui {
                     Key::End => offset = max_offset,
                     _ => {}
                 }
+                self.output_cursor = None;
                 self.mode = Mode::Output { block, offset };
             }
             Mode::Help { mut offset } => {
                 let max_offset = self.keyboard_help().len().saturating_sub(self.page_size);
                 match key {
+                    Key::Char(':') => {
+                        self.input_return = Some(Mode::Help { offset });
+                        self.mode = Mode::Command(String::new());
+                        return true;
+                    }
                     Key::Char('q') => return false,
                     Key::Escape | Key::Enter | Key::Char('?') => return true,
                     Key::ArrowUp | Key::Char('k') => offset = offset.saturating_sub(1),
@@ -1004,6 +1405,10 @@ impl Ui {
         if width >= 90 && height >= 16 {
             return self.render_split(width, height);
         }
+        let output_rows = match self.content_mode() {
+            Mode::Output { block, .. } => self.output_rows(block, (width, height)),
+            _ => Rc::new(Vec::new()),
+        };
         let mut rows: Vec<(String, bool)> = vec![(String::new(), false); height];
         if height < 8 || width < 24 {
             rows[0].0 = "Terminal too small (minimum 24x8). q: quit".into();
@@ -1041,8 +1446,12 @@ impl Ui {
                     .join("  ")
             );
             let body_height = height - 6;
-            let (heading, content, selection) = match &self.mode {
-                Mode::Normal | Mode::Search { .. } | Mode::Command(_) => {
+            let (heading, content, selection) = match self.content_mode() {
+                Mode::Normal
+                | Mode::Search { .. }
+                | Mode::Command(_)
+                | Mode::OutputSearch(_)
+                | Mode::GoToLine(_) => {
                     let items = self.visible_items();
                     (
                         format!(
@@ -1080,21 +1489,9 @@ impl Ui {
                         .collect(),
                     Some(*selected),
                 ),
-                Mode::Output { block, offset } => (
-                    format!(
-                        "Output | {} | {} | line {}",
-                        block.source,
-                        block.status,
-                        offset + 1
-                    ),
-                    block
-                        .content
-                        .lines()
-                        .skip(*offset)
-                        .map(str::to_owned)
-                        .collect(),
-                    None,
-                ),
+                Mode::Output { block, offset } => {
+                    self.output_content(block, *offset, (width, height))
+                }
                 Mode::Help { offset } => (
                     "Keyboard help (prototype defaults)".into(),
                     self.keyboard_help().into_iter().skip(*offset).collect(),
@@ -1118,7 +1515,12 @@ impl Ui {
             }
             rows[height - 2].0 = match &self.mode {
                 Mode::Command(input) => format!(":{input}_"),
+                Mode::OutputSearch(input) => format!("Find /{input}_"),
+                Mode::GoToLine(input) => format!("Line > {input}_"),
                 Mode::Search { .. } => format!("/{}_", self.filter),
+                Mode::Output { .. } if self.message.is_empty() && !self.output_query.is_empty() => {
+                    self.output_search_status()
+                }
                 _ if !self.pending.is_empty() => self.pending_hint(),
                 _ if !self.message.is_empty() => format!("Error: {}", self.message),
                 _ if !self.binding_errors.is_empty() => {
@@ -1136,10 +1538,13 @@ impl Ui {
                 Mode::Palette { .. } => {
                     "Type to filter   ↑↓: select   Enter: run   Esc: back".into()
                 }
-                Mode::Command(_) | Mode::Search { .. } => {
+                Mode::Command(_) | Mode::Search { .. } | Mode::OutputSearch(_) | Mode::GoToLine(_) => {
                     "Type text   Enter: accept   Esc: cancel".into()
                 }
-                Mode::Output { .. } => "↑↓ / j k: scroll   PgUp/PgDn   Esc: back   q: quit".into(),
+                Mode::Output { .. } => {
+                    "/: find   n/N: matches   g: line   v: source   : command   Esc: back   ↑↓: scroll"
+                        .into()
+                }
                 Mode::Help { .. } => "↑↓ / j k: scroll   Esc: back   q: quit".into(),
                 Mode::Normal => {
                     "Enter: open/actions  a: all  Backspace: up  Space: palette  ?: help  q: quit"
@@ -1153,13 +1558,25 @@ impl Ui {
             if highlighted {
                 screen.push_str("\x1b[7m");
             }
+            let output_line = if index >= 4 && index < height.saturating_sub(2) {
+                if let Mode::Output { offset, .. } = self.content_mode() {
+                    output_rows.get(offset + index - 4)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if output_line.is_some() {
+                screen.push_str(self.output_style(output_line));
+            }
             // Reserve the final column so writing never triggers terminal autowrap.
             screen.push_str(&truncate_str(
                 &safe_text(&text),
                 width.saturating_sub(1),
                 "",
             ));
-            if highlighted {
+            if highlighted || output_line.is_some() {
                 screen.push_str("\x1b[0m");
             }
             if index + 1 < height {
@@ -1172,6 +1589,10 @@ impl Ui {
     fn render_split(&self, width: usize, height: usize) -> String {
         let width = width - 1; // Keep the terminal's autowrap column unused.
         let rich = height >= 24;
+        let output_rows = match self.content_mode() {
+            Mode::Output { block, .. } => self.output_rows(block, (width + 1, height)),
+            _ => Rc::new(Vec::new()),
+        };
         let left = (width * 44 / 100).max(32);
         let right = width - left - 1;
         let body_height = viewport_rows(width + 1, height);
@@ -1256,7 +1677,7 @@ impl Ui {
             BORDER,
         ));
 
-        let (heading, content, selection) = match &self.mode {
+        let (heading, content, selection) = match self.content_mode() {
             Mode::Actions { entries, selected } => (
                 format!("Actions | {}", self.action_context()),
                 entries
@@ -1273,21 +1694,9 @@ impl Ui {
                     .collect(),
                 Some(*selected),
             ),
-            Mode::Output { block, offset } => (
-                format!(
-                    "Output | {} | {} | line {}",
-                    block.source,
-                    block.status,
-                    offset + 1
-                ),
-                block
-                    .content
-                    .lines()
-                    .skip(*offset)
-                    .map(str::to_owned)
-                    .collect(),
-                None,
-            ),
+            Mode::Output { block, offset } => {
+                self.output_content(block, *offset, (width + 1, height))
+            }
             Mode::Help { offset } => (
                 "Keyboard help (prototype defaults)".into(),
                 self.keyboard_help().into_iter().skip(*offset).collect(),
@@ -1333,7 +1742,7 @@ impl Ui {
                 ACCENT,
             ),
             &panel_cell(
-                if rich && matches!(self.mode, Mode::Output { .. }) {
+                if rich && matches!(self.content_mode(), Mode::Output { .. }) {
                     self.output_item.as_deref().unwrap_or(&heading)
                 } else {
                     &heading
@@ -1345,8 +1754,11 @@ impl Ui {
             "",
         ));
         if rich {
-            let metadata = match &self.mode {
-                Mode::Output { .. } => heading.clone(),
+            let metadata = match self.content_mode() {
+                Mode::Output { .. } => self
+                    .output_item
+                    .as_ref()
+                    .map_or_else(String::new, |_| heading.clone()),
                 _ => selected.map_or_else(
                     || "No selection".into(),
                     |item| format!("{}  ·  {}", item.kind, self.plugin_id().unwrap_or_default()),
@@ -1399,8 +1811,19 @@ impl Ui {
                 if selection.is_some() {
                     format!("{} {line}", focus_marker(selection == Some(detail_index)))
                 } else if rich {
-                    if let Mode::Output { offset, .. } = self.mode {
-                        format!(" {:>3}  {line}", offset + row + 1)
+                    if let Mode::Output { block, offset } = self.content_mode() {
+                        let index = offset + row;
+                        let source = output_rows.get(index).map_or(0, |line| line.source);
+                        let digits = block.content.lines().count().to_string().len().max(3);
+                        let continuation = index > 0
+                            && output_rows
+                                .get(index - 1)
+                                .is_some_and(|previous| previous.source == source);
+                        if continuation {
+                            format!(" {}  {line}", " ".repeat(digits))
+                        } else {
+                            format!(" {:>digits$}  {line}", source + 1)
+                        }
                     } else {
                         format!("  {line}")
                     }
@@ -1424,7 +1847,13 @@ impl Ui {
                     if selection == Some(detail_index) {
                         SELECTED
                     } else {
-                        TEXT
+                        self.output_style(
+                            if let Mode::Output { offset, .. } = self.content_mode() {
+                                output_rows.get(offset + row)
+                            } else {
+                                None
+                            },
+                        )
                     },
                 ),
                 "",
@@ -1439,7 +1868,12 @@ impl Ui {
         ));
         let status = match &self.mode {
             Mode::Command(input) => format!(":{input}_"),
+            Mode::OutputSearch(input) => format!("Find /{input}_"),
+            Mode::GoToLine(input) => format!("Line > {input}_"),
             Mode::Search { .. } => format!("/{}_", self.filter),
+            Mode::Output { .. } if self.message.is_empty() && !self.output_query.is_empty() => {
+                self.output_search_status()
+            }
             _ if !self.pending.is_empty() => self.pending_hint(),
             _ if !self.message.is_empty() => format!("Error: {}", self.message),
             _ if !self.binding_errors.is_empty() => {
@@ -1475,9 +1909,22 @@ impl Ui {
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
-            Mode::Output { .. } | Mode::Help { .. } => &[
+            Mode::Output { .. } => &[
+                ("/", "Find"),
+                ("n/N", "Matches"),
+                ("g", "Line"),
+                ("v", "Source"),
+                (":", "Command"),
+                ("Esc", "Back"),
                 ("↑↓", "Scroll"),
                 ("PgUp/PgDn", "Page"),
+                ("Home/End", "Start/end"),
+                ("q", "Quit"),
+            ],
+            Mode::Help { .. } => &[
+                ("↑↓", "Scroll"),
+                ("PgUp/PgDn", "Page"),
+                (":", "Command"),
                 ("Esc", "Back"),
                 ("q", "Quit"),
             ],

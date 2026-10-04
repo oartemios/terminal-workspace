@@ -1,6 +1,6 @@
 # Catalog — пример custom plugin
 
-Независимый Rust package вне first-party дерева. Секции и заметки сохраняют нативную семантику; opaque locations, default Action, Navigation и parent используют основной Plugin API 0.4. Core не интерпретирует секции как каталоги.
+Независимый Rust package вне first-party дерева. Секции и заметки сохраняют нативную семантику; opaque locations, default Action, Navigation и parent используют основной Plugin API 0.5. Core не интерпретирует секции как каталоги.
 
 ## Сборка и установка
 

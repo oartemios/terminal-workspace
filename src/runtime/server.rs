@@ -111,8 +111,16 @@ fn dispatch(
             let workspace = context.workspace(plugin.id())?;
             plugin.start(&workspace, &context.permissions)?;
             let outcome = plugin.execute(&workspace, &invocation)?;
-            if matches!(outcome, CommandOutcome::WorkspaceChanged) {
-                return Err("WorkspaceChanged is reserved for Core".into());
+            if matches!(
+                outcome,
+                CommandOutcome::WorkspaceChanged | CommandOutcome::View(_)
+            ) {
+                return Err(if matches!(outcome, CommandOutcome::View(_)) {
+                    "View outcomes are reserved for Core"
+                } else {
+                    "WorkspaceChanged is reserved for Core"
+                }
+                .into());
             }
             serde_json::to_value(outcome).map_err(|e| e.to_string())
         }

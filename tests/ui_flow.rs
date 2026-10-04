@@ -88,7 +88,7 @@ fn split_output_scrolls_to_the_final_line_after_resize() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.0.join("long.txt"),
-        (1..=60).fold(String::new(), |mut text, i| {
+        (1..=2000).fold(String::new(), |mut text, i| {
             writeln!(text, "line {i}").unwrap();
             text
         }),
@@ -98,10 +98,10 @@ fn split_output_scrolls_to_the_final_line_after_resize() {
     ui.resize_to(120, 24);
     type_text(&mut ui, "p");
     ui.handle(Key::End);
-    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("line 60"));
+    assert!(strip_ansi_codes(&ui.render(120, 24)).contains("line 2000"));
     ui.resize_to(90, 16);
     ui.handle(Key::End);
-    assert!(strip_ansi_codes(&ui.render(90, 16)).contains("line 60"));
+    assert!(strip_ansi_codes(&ui.render(90, 16)).contains("line 2000"));
 }
 
 #[test]
@@ -366,6 +366,7 @@ impl Plugin for StatusPlugin {
     }
     fn execute(&self, _: &Workspace, _: &CommandInvocation) -> Result<CommandOutcome, String> {
         Ok(CommandOutcome::Output(Block {
+            format: terminal_workspace::ContentFormat::Text,
             source: "Status".into(),
             status: "ok".into(),
             content: "command without an item".into(),
@@ -613,4 +614,251 @@ fn revoking_permission_clears_cached_items_and_reports_the_reason() {
     type_text(&mut ui, ",g");
     ui.handle(Key::Escape);
     assert!(frame(&ui).contains("private.txt"));
+}
+
+#[test]
+fn commands_from_output_preserve_preview_on_cancel_empty_input_and_error() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("long.txt"),
+        (1..=2000).fold(String::new(), |mut content, n| {
+            writeln!(content, "preview line {n}").unwrap();
+            content
+        }),
+    )
+    .unwrap();
+    for (width, height) in [(140, 32), (80, 12)] {
+        let mut ui = fixture.ui();
+        ui.resize_to(width, height);
+        type_text(&mut ui, "p");
+        ui.handle(Key::End);
+        let render = |ui: &Ui| strip_ansi_codes(&ui.render(width, height)).into_owned();
+        assert!(render(&ui).contains("preview line 2000"));
+        type_text(&mut ui, ":files.path");
+        assert!(render(&ui).contains(":files.path_"));
+        assert!(render(&ui).contains("preview line 2000"));
+        ui.handle(Key::Escape);
+        assert!(render(&ui).contains("preview line 2000"));
+        assert!(!render(&ui).contains(":files.path_"));
+        type_text(&mut ui, ":");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("preview line 2000"));
+        type_text(&mut ui, ":unknown");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("Error: Unknown command: unknown"));
+        assert!(render(&ui).contains("preview line 2000"));
+        type_text(&mut ui, ":files.path");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("long.txt"));
+        assert!(!render(&ui).contains("preview line 2000"));
+        ui.handle(Key::Escape);
+        assert!(!render(&ui).contains("Output |"));
+    }
+}
+
+#[test]
+fn navigation_and_help_commands_do_not_leave_a_stale_output_context() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("note.txt"), "original preview").unwrap();
+    std::fs::create_dir(fixture.0.join("nested")).unwrap();
+    let mut ui = fixture.ui();
+    select(&mut ui, "note.txt");
+    type_text(&mut ui, "p");
+    type_text(&mut ui, ":files.open nested");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("/nested/"));
+    assert!(!frame(&ui).contains("original preview"));
+    type_text(&mut ui, ":");
+    ui.handle(Key::Escape);
+    assert!(frame(&ui).contains("/nested/"));
+    ui.handle(Key::Char('?'));
+    ui.handle(Key::End);
+    type_text(&mut ui, ":core.plugins");
+    assert!(frame(&ui).contains(":core.plugins_"));
+    ui.handle(Key::Escape);
+    assert!(frame(&ui).contains("Keyboard help"));
+    type_text(&mut ui, ":core.plugins");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("files: active"));
+    ui.handle(Key::Escape);
+    assert!(!frame(&ui).contains("Keyboard help"));
+}
+
+#[test]
+fn output_search_and_goto_use_source_lines_and_survive_cancel_errors_and_resize() {
+    let fixture = Fixture::new();
+    let content = (1..=200).fold(String::new(), |mut text, line| {
+        writeln!(
+            text,
+            "{} row {line}",
+            if [40, 120, 180].contains(&line) {
+                "совпадение"
+            } else {
+                "text"
+            }
+        )
+        .unwrap();
+        text
+    });
+    std::fs::write(fixture.0.join("document.md"), content).unwrap();
+    for size in [(140, 32), (80, 12)] {
+        let mut ui = fixture.ui();
+        ui.resize_to(size.0, size.1);
+        type_text(&mut ui, "p");
+        let render = |ui: &Ui| strip_ansi_codes(&ui.render(size.0, size.1)).into_owned();
+        type_text(&mut ui, "/совпадение");
+        assert!(render(&ui).contains("Find /совпадение_"));
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("row 40"));
+        assert!(render(&ui).contains("match 1/3"));
+        type_text(&mut ui, "n");
+        assert!(render(&ui).contains("row 120"));
+        assert!(render(&ui).contains("match 2/3"));
+        type_text(&mut ui, "n");
+        assert!(render(&ui).contains("row 180"));
+        type_text(&mut ui, "n");
+        assert!(render(&ui).contains("row 40"));
+        type_text(&mut ui, "N");
+        assert!(render(&ui).contains("row 180"));
+        type_text(&mut ui, "/");
+        ui.handle(Key::Escape);
+        assert!(render(&ui).contains("row 180"));
+        type_text(&mut ui, "g120");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("row 120"));
+        type_text(&mut ui, ":40");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("row 40"));
+        type_text(&mut ui, ":core.view.goto 120");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("row 120"));
+        type_text(&mut ui, " core.view.goto");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("Line > _"));
+        type_text(&mut ui, "40");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("row 40"));
+        type_text(&mut ui, " ");
+        ui.handle(Key::Escape);
+        assert!(render(&ui).contains("row 40"));
+        type_text(&mut ui, ":120");
+        ui.handle(Key::Enter);
+        type_text(&mut ui, "g0");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("positive integer"));
+        assert!(render(&ui).contains("row 120"));
+        type_text(&mut ui, "g999");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("outside 1..200"));
+        assert!(render(&ui).contains("row 120"));
+        type_text(&mut ui, "g1");
+        ui.handle(Key::Escape);
+        assert!(render(&ui).contains("row 120"));
+        type_text(&mut ui, ":core.view.find missing");
+        ui.handle(Key::Enter);
+        assert!(render(&ui).contains("No match: missing"));
+        assert!(render(&ui).contains("row 120"));
+        type_text(&mut ui, "/");
+        ui.handle(Key::Backspace);
+        for _ in 0..6 {
+            ui.handle(Key::Backspace);
+        }
+        ui.handle(Key::Enter);
+        assert!(!render(&ui).contains("No match:"));
+        ui.resize_to(120, 24);
+        assert!(strip_ansi_codes(&ui.render(120, 24)).contains("row 120"));
+    }
+}
+
+#[test]
+fn markdown_preview_wraps_long_lines_keeps_code_and_can_toggle_source() {
+    let fixture = Fixture::new();
+    let paragraph = format!("{} end-of-long-paragraph", "word ".repeat(120));
+    std::fs::write(fixture.0.join("README.md"), format!("# Heading\n{paragraph}\n- **bold item**\n```rust\nlet s = \"**literal**\";\n```\n> Quote\n")).unwrap();
+    let mut ui = fixture.ui();
+    ui.resize_to(100, 24);
+    type_text(&mut ui, "p");
+    assert!(frame(&ui).contains("Heading"));
+    assert!(!frame(&ui).contains("# Heading"));
+    type_text(&mut ui, "/end-of-long-paragraph");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("end-of-long-paragraph"));
+    type_text(&mut ui, ":3");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("• bold item"));
+    type_text(&mut ui, "v");
+    assert!(frame(&ui).contains("- **bold item**"));
+    type_text(&mut ui, "v");
+    assert!(frame(&ui).contains("• bold item"));
+    type_text(&mut ui, ":5");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("**literal**"));
+    type_text(&mut ui, ":7");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("│ Quote"));
+}
+
+#[test]
+fn repeated_size_notifications_do_not_trap_scroll_inside_a_wrapped_line() {
+    let fixture = Fixture::new();
+    let mut content = (1..=18).fold(String::new(), |mut text, line| {
+        writeln!(text, "source line {line}").unwrap();
+        text
+    });
+    writeln!(content, "{}", "word ".repeat(1200)).unwrap();
+    content.push_str("after long paragraph\nlast source line\n");
+    std::fs::write(fixture.0.join("README.md"), content).unwrap();
+    for (width, height) in [(140, 32), (80, 12)] {
+        let mut ui = fixture.ui();
+        ui.resize_to(width, height);
+        type_text(&mut ui, "p");
+        for _ in 0..250 {
+            ui.handle(Key::Char('j'));
+            // The actual event loop supplies the terminal size before every draw.
+            ui.resize_to(width, height);
+        }
+        assert!(strip_ansi_codes(&ui.render(width, height)).contains("last source line"));
+        for _ in 0..250 {
+            ui.handle(Key::Char('k'));
+            ui.resize_to(width, height);
+        }
+        assert!(strip_ansi_codes(&ui.render(width, height)).contains("source line 1"));
+        for _ in 0..30 {
+            ui.handle(Key::PageDown);
+            ui.resize_to(width, height);
+        }
+        assert!(strip_ansi_codes(&ui.render(width, height)).contains("last source line"));
+    }
+}
+
+#[test]
+fn wrapped_source_line_is_numbered_once_in_markdown_and_raw_preview() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("README.md"),
+        format!("# Heading\n{}\nending\n", "word ".repeat(100)),
+    )
+    .unwrap();
+    let mut ui = fixture.ui();
+    ui.resize_to(140, 32);
+    type_text(&mut ui, "p");
+    for _ in 0..2 {
+        ui.handle(Key::Home);
+        let rendered = strip_ansi_codes(&ui.render(140, 32)).into_owned();
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.contains("  2  word"))
+                .count(),
+            1
+        );
+        assert!(
+            rendered
+                .lines()
+                .filter(|line| line.contains("word"))
+                .count()
+                > 1
+        );
+        type_text(&mut ui, "v");
+    }
 }

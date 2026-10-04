@@ -124,6 +124,7 @@ impl Plugin for CatalogPlugin {
             })),
             "catalog.read" if invocation.item.as_deref() == Some("intro.note") => {
                 Ok(CommandOutcome::Output(Block {
+                    format: terminal_workspace::ContentFormat::Markdown,
                     source: "Catalog".into(),
                     status: "ok".into(),
                     content: format!(

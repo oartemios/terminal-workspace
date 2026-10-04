@@ -1,6 +1,6 @@
-# Plugin API v0.4 — draft
+# Plugin API v0.5 — draft
 
-`PLUGIN_API_VERSION = "0.4"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
+`PLUGIN_API_VERSION = "0.5"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
 
 ## Данные и вызовы
 
@@ -9,7 +9,8 @@
 - `GroupView` содержит Items, title, opaque location, parent invocation и command_defaults. Item id/kind имеют нативный смысл; Core не интерпретирует их как пути. ID элементов одного view уникальны.
 - `item_icon` задаёт символ списка; Core заменяет небезопасные/неодноклеточные символы на fallback.
 - `actions` задаёт действия Item; `try_actions` позволяет сообщить ошибку. Максимум одно действие default: Enter/`l` вызывает его, иначе открывает Actions. CommandId и invocation.id должны совпадать и принадлежать плагину.
-- `execute` возвращает `Output(Block)` либо `Navigate(Navigation)` с группой, opaque location и необязательным selected ItemId. `WorkspaceChanged` зарезервирован для Core.
+- `Block.format` объявляет `Text` (default) или `Markdown`; source content сохраняется для поиска, source-line навигации и переключения presentation/source. Core предоставляет общий безопасный terminal renderer.
+- `execute` возвращает `Output(Block)` либо `Navigate(Navigation)` с группой, opaque location и необязательным selected ItemId. `WorkspaceChanged` и `View(ViewRequest)` зарезервированы для Core и отклоняются от плагинов.
 
 `CommandInvocation.args` независим от Item. App проверяет регистрацию, activation и permissions; bindings, `:commands`, palette и Actions сходятся к одному маршруту. В TUI явный аргумент имеет приоритет, затем command_defaults view, затем выбранный Item для команды его плагина, требующей Item. Ошибка загрузки нового view сохраняет текущий контекст. Фильтр, порядок и выбор сохраняются для локации в сессии.
 
@@ -56,3 +57,5 @@ Host очищает environment; передаёт только manifest allowlis
 Defaults остаются изменяемыми: Files — локальный `p` для preview; Catalog — `p` для Read note только в Introduction. Открытие и parent используют общую грамматику `h/j/k/l`, Enter и Backspace. [Итерация 2.1](decisions/0005-keyboard-defaults.md) описывает раскладку; ранее удалённые aliases можно вернуть overrides.
 
 Изменения относительно 0.3: сериализуемые DTO, дополнительные permissions, lifecycle/status hooks, borrowed id/name, процессный SDK и фактическая установка пакета без пересборки host. Внешний контракт остаётся draft; events, фоновые задачи и refresh strategies появятся отдельно.
+
+API 0.5 добавляет ContentFormat и Core-only ViewRequest. Rust Block literals должны явно задавать format. Новый host принимает manifests API 0.4 и 0.5; в старых JSON Blocks отсутствие format означает Text. Package/protocol остаются version 1. `core.view.find/goto/next/previous/source` управляют открытым output, не требуют Item и не вызывают plugin. `/`, `g`, `n/N`, `v`, `:120` и адресуемые команды сходятся к этому маршруту.

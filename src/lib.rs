@@ -6,13 +6,15 @@ mod bindings;
 mod config;
 pub use bindings::BindingScope;
 pub mod files;
+pub mod git;
 pub mod runtime;
 pub mod ui;
+mod viewer;
 pub use config::CONFIG_FILE;
 use serde_json::{json, Value};
 
 /// Draft source-level Plugin API; no dynamic ABI or isolation is implied.
-pub const PLUGIN_API_VERSION: &str = "0.4";
+pub const PLUGIN_API_VERSION: &str = "0.5";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyBinding {
@@ -63,6 +65,23 @@ pub struct Block {
     pub source: String,
     pub status: String,
     pub content: String,
+    #[serde(default)]
+    pub format: ContentFormat,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ContentFormat {
+    #[default]
+    Text,
+    Markdown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ViewRequest {
+    Find(Option<String>),
+    GoToLine(Option<usize>),
+    NextMatch { backwards: bool },
+    ToggleSource,
 }
 
 /// Location and item identifiers are opaque to Core, and interpreted by a plugin.
@@ -78,6 +97,8 @@ pub enum CommandOutcome {
     Output(Block),
     Navigate(Navigation),
     WorkspaceChanged,
+    /// Core-owned navigation of the current output, independent of plugin Items.
+    View(ViewRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -924,13 +945,48 @@ impl App {
                 invocation.id
             )
         })??;
-        if matches!(outcome, CommandOutcome::WorkspaceChanged) {
-            return Err("WorkspaceChanged is reserved for Core".into());
+        if matches!(
+            outcome,
+            CommandOutcome::WorkspaceChanged | CommandOutcome::View(_)
+        ) {
+            return Err(if matches!(outcome, CommandOutcome::View(_)) {
+                "View outcomes are reserved for Core"
+            } else {
+                "WorkspaceChanged is reserved for Core"
+            }
+            .into());
         }
         Ok(outcome)
     }
 
     fn invoke_core(&mut self, invocation: CommandInvocation) -> Result<CommandOutcome, String> {
+        if invocation.id.starts_with("core.view.") {
+            let arg = match invocation.args.as_slice() {
+                [] => None,
+                [arg] => Some(arg),
+                _ => return Err("View command accepts at most one argument".into()),
+            };
+            let request = match invocation.id.as_str() {
+                "core.view.find" => ViewRequest::Find(arg.cloned()),
+                "core.view.goto" => ViewRequest::GoToLine(
+                    arg.map(|arg| {
+                        arg.parse::<usize>()
+                            .ok()
+                            .filter(|line| *line > 0)
+                            .ok_or("Line number must be a positive integer")
+                    })
+                    .transpose()?,
+                ),
+                "core.view.next" | "core.view.previous" | "core.view.source" if arg.is_some() => {
+                    return Err("This view command takes no arguments".into())
+                }
+                "core.view.next" => ViewRequest::NextMatch { backwards: false },
+                "core.view.previous" => ViewRequest::NextMatch { backwards: true },
+                "core.view.source" => ViewRequest::ToggleSource,
+                _ => return Err("Unknown view command".into()),
+            };
+            return Ok(CommandOutcome::View(request));
+        }
         let content = match invocation.id.as_str() {
             "core.plugin.install" => {
                 if invocation.args.len() != 1 {
@@ -1098,6 +1154,7 @@ impl App {
             }
         };
         Ok(CommandOutcome::Output(Block {
+            format: ContentFormat::Text,
             source: "Core".into(),
             status: "ok".into(),
             content,
@@ -1107,6 +1164,17 @@ impl App {
 
 fn core_commands() -> Vec<Command> {
     [
+        ("core.view.find", "Find text in viewed output"),
+        ("core.view.goto", "Go to source line in viewed output"),
+        ("core.view.next", "Next matching line in viewed output"),
+        (
+            "core.view.previous",
+            "Previous matching line in viewed output",
+        ),
+        (
+            "core.view.source",
+            "Toggle Markdown/source in viewed output",
+        ),
         (
             "core.plugin.install",
             "Install local plugin package (directory)",

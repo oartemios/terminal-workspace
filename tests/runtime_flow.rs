@@ -495,3 +495,39 @@ fn package_boundary_rejects_symlinks_and_uninstall_does_not_reinstall_distributi
     fixture.store.install(&package).unwrap();
     assert!(!fixture.store.is_trusted("files"));
 }
+
+#[test]
+fn files_preview_reads_beyond_eight_kib_and_reports_oversized_files_without_partial_output() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    let content = format!("{}\nfinal preview line\n", "строка\n".repeat(2000));
+    std::fs::write(fixture.first.join("note.txt"), &content).unwrap();
+    assert_eq!(files(&mut app), content);
+    // Worst-case JSON escaping still fits inside the executable protocol limit.
+    let boundary = "\x01".repeat(128 * 1024);
+    std::fs::write(fixture.first.join("note.txt"), &boundary).unwrap();
+    assert_eq!(files(&mut app), boundary);
+    std::fs::write(fixture.first.join("note.txt"), "x".repeat(128 * 1024 + 1)).unwrap();
+    let error = app
+        .invoke(CommandInvocation {
+            id: "files.preview".into(),
+            item: Some("note.txt".into()),
+            args: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(error.contains("128 KiB preview limit"));
+    std::fs::write(fixture.first.join("note.txt"), "recovered preview").unwrap();
+    assert_eq!(files(&mut app), "recovered preview");
+}
+
+#[test]
+fn old_api_packages_and_text_blocks_remain_compatible() {
+    let mut manifest = Manifest::for_plugin(&FilesPlugin, vec!["--serve-files".into()]);
+    manifest.api_version = "0.4".into();
+    manifest.compatible().unwrap();
+    let block: terminal_workspace::Block = serde_json::from_value(
+        serde_json::json!({"source":"Old plugin","status":"ok","content":"# literal text"}),
+    )
+    .unwrap();
+    assert_eq!(block.format, terminal_workspace::ContentFormat::Text);
+}
