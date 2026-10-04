@@ -1,6 +1,6 @@
 use crate::{
-    Action, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView, Item, Navigation,
-    Permission, Plugin, Workspace,
+    Action, BindingScope, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView,
+    Item, KeyBinding, Navigation, Permission, Plugin, Workspace,
 };
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -75,6 +75,7 @@ impl Plugin for FilesPlugin {
         let parent = CommandInvocation {
             id: "files.parent".into(),
             item: Some(location.clone()),
+            args: Vec::new(),
         };
         Ok(GroupView {
             title: if location == "." {
@@ -137,6 +138,26 @@ impl Plugin for FilesPlugin {
                 requires_item: true,
             },
         ]
+    }
+
+    fn keybindings(&self) -> Vec<KeyBinding> {
+        [
+            ("p", "preview"),
+            ("y", "path"),
+            ("o", "open"),
+            ("u", "parent"),
+            ("fp", "preview"),
+            ("fs", "path"),
+            ("fo", "open"),
+            ("fu", "parent"),
+        ]
+        .into_iter()
+        .map(|(keys, command)| KeyBinding {
+            keys: keys.into(),
+            command_id: format!("files.{command}"),
+            scope: BindingScope::Plugin("files".into()),
+        })
+        .collect()
     }
 
     fn execute(
@@ -219,6 +240,7 @@ fn action(name: &str, label: &str, item: &str) -> Action {
         invocation: CommandInvocation {
             id,
             item: Some(item.into()),
+            args: Vec::new(),
         },
     }
 }

@@ -1,5 +1,6 @@
 """Unix PTY smoke check. Run after cargo build: python3 tests/tui_pty.py."""
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -149,6 +150,36 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
     finally:
         session.close()
 
+    with tempfile.TemporaryDirectory(prefix="tw other project ") as second:
+        Path(second, "second.txt").write_text("second project preview", encoding="utf-8")
+        Path(second, ".terminal-workspace.json").write_text(json.dumps({
+            "version": 1, "plugins": {"files": {"enabled": True, "permissions": ["WorkspaceRead"]}},
+            "overrides": {"keybindings": [
+                {"keys": "p", "plugin": "files", "command": None},
+                {"keys": "xyz", "plugin": "files", "command": "files.preview"},
+            ]},
+        }), encoding="utf-8")
+        session = Session(workspace)
+        try:
+            session.send("/заметка\rp".encode(), b"preview through the real terminal")
+            session.send(b"\x1b", b"> Items")
+            session.send(b",w", b":core.workspace.open ")
+            session.send(second.encode() + b"\r", b"second.txt")
+            session.send(b"/second\r", b"filter: second")
+            session.send(b"xy", b"xy ")
+            session.send(b"\x1b", b"> Items")
+            session.send(b"xyz", b"second project preview")
+            session.send(b"\x1b", b"> Items")
+            session.send(b",b", "filter: заметка".encode())
+            session.send(b"p", b"preview through the real terminal")
+            session.send(b"\x1b", b"> Items")
+            session.send(b":core.workspace.open missing-project\r", b"Error:")
+            session.send(b"p", b"preview through the real terminal")
+            session.exit(b"q")
+            print("Workspace switch, path with spaces, local bindings, overrides, prefix cancellation, context restoration and failed-open recovery: passed")
+        finally:
+            session.close()
+
     for key, name in [(b"q", "q"), (b"\x04", "Ctrl-D")]:
         session = Session(workspace)
         try:
@@ -156,3 +187,30 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
             print(f"{name} restores terminal: passed")
         finally:
             session.close()
+
+    for command, expected in [
+        (b",s", b"files: session disabled"),
+        (b":core.plugins\r", b"files: active"),
+        (b",d", b"files: workspace disabled"),
+        (b":core.plugins\r", b"files: workspace disabled"),
+        (b",e", b"enabled for Workspace and session"),
+        (b",r", b"WorkspaceRead revoked"),
+    ]:
+        session = Session(workspace)
+        try:
+            session.send(command, expected)
+            session.exit(b"q")
+        finally:
+            session.close()
+    session = Session(workspace)
+    try:
+        assert b"WorkspaceRead not granted" in session.transcript
+        session.send(b" ", b"Command palette")
+        session.send(b"core.permission.grant-read", b"core.permission.grant-read")
+        session.send(b"\r", b"WorkspaceRead granted")
+        session.send(b"\x1b", b"> Items")
+        session.send("/заметка\rfp".encode(), b"preview through the real terminal")
+        session.exit(b"q")
+        print("Activation and permission commands, restart persistence, palette recovery: passed")
+    finally:
+        session.close()

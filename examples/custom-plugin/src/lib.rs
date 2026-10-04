@@ -1,7 +1,7 @@
 //! Independently packaged plugin using the same draft API as Files.
 use terminal_workspace::{
-    Action, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView, Item, Navigation,
-    Plugin, Workspace,
+    Action, BindingScope, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView,
+    Item, KeyBinding, Navigation, Plugin, Workspace,
 };
 
 pub struct CatalogPlugin;
@@ -54,6 +54,7 @@ impl Plugin for CatalogPlugin {
         let parent = CommandInvocation {
             id: "catalog.parent".into(),
             item: None,
+            args: Vec::new(),
         };
         Ok(GroupView {
             title: format!("{title} · {}", workspace.root().display()),
@@ -80,6 +81,7 @@ impl Plugin for CatalogPlugin {
             invocation: CommandInvocation {
                 id: id.into(),
                 item: Some(item.id.clone()),
+                args: Vec::new(),
             },
         }]
     }
@@ -124,10 +126,45 @@ impl Plugin for CatalogPlugin {
                 Ok(CommandOutcome::Output(Block {
                     source: "Catalog".into(),
                     status: "ok".into(),
-                    content: format!("Welcome to {}", workspace.root().display()),
+                    content: format!(
+                        "{} {}",
+                        workspace
+                            .plugin_settings("catalog")
+                            .and_then(|settings| settings.get("greeting"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("Welcome to"),
+                        workspace.root().display()
+                    ),
                 }))
             }
             _ => Err("Unknown catalog operation or item".into()),
         }
+    }
+
+    fn keybindings(&self) -> Vec<KeyBinding> {
+        vec![
+            KeyBinding {
+                keys: "o".into(),
+                command_id: "catalog.open".into(),
+                scope: BindingScope::Plugin("catalog".into()),
+            },
+            KeyBinding {
+                keys: "u".into(),
+                command_id: "catalog.parent".into(),
+                scope: BindingScope::Group {
+                    plugin: "catalog".into(),
+                    group: "sections".into(),
+                },
+            },
+            KeyBinding {
+                keys: "nrd".into(),
+                command_id: "catalog.read".into(),
+                scope: BindingScope::View {
+                    plugin: "catalog".into(),
+                    group: "sections".into(),
+                    location: "intro".into(),
+                },
+            },
+        ]
     }
 }

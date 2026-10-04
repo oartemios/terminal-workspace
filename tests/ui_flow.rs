@@ -157,7 +157,7 @@ fn all_four_command_entry_points_render_the_same_plugin_result() {
                 ui.handle(Key::Enter);
             }
             1 => {
-                type_text(&mut ui, "fp");
+                type_text(&mut ui, "p");
             }
             2 => {
                 ui.handle(Key::Char(':'));
@@ -533,4 +533,77 @@ fn internal_symlink_returns_logically_and_external_symlink_is_rejected() {
         assert!(frame(&ui).contains("Error: Path is outside the workspace"));
         assert!(frame(&ui).contains("| / |"));
     }
+}
+
+#[test]
+fn core_activation_routes_work_without_an_item_and_recover_the_view() {
+    let fixture = Fixture::new();
+    for route in 0..4 {
+        let mut ui = fixture.ui();
+        match route {
+            0 => type_text(&mut ui, ",s"),
+            1 => {
+                ui.handle(Key::Char(':'));
+                type_text(&mut ui, "core.plugin.suspend files");
+                ui.handle(Key::Enter);
+            }
+            2 => {
+                ui.handle(Key::Char(' '));
+                type_text(&mut ui, "core.plugin.suspend");
+                ui.handle(Key::Enter);
+            }
+            _ => {
+                ui.handle(Key::Tab);
+                ui.handle(Key::Char('a'));
+                assert!(frame(&ui).contains("Actions | files"));
+                for _ in 0..5 {
+                    ui.handle(Key::ArrowDown);
+                }
+                ui.handle(Key::Enter);
+            }
+        }
+        assert!(
+            frame(&ui).contains("files: session disabled"),
+            "route {route}: {}",
+            frame(&ui)
+        );
+        ui.handle(Key::Escape);
+        assert!(!frame(&ui).contains("[Entries]"));
+        ui.handle(Key::Char(' '));
+        type_text(&mut ui, "core.plugin.enable");
+        ui.handle(Key::Enter);
+        assert!(frame(&ui).contains("enabled for Workspace and session"));
+        ui.handle(Key::Escape);
+        assert!(frame(&ui).contains("[Entries]"));
+        assert!(!frame(&ui).contains("Plugin inactive"));
+    }
+}
+
+#[test]
+fn core_commands_remain_discoverable_with_no_installed_plugins() {
+    let fixture = Fixture::new();
+    let mut ui = Ui::new(App::new(fixture.0.clone()).unwrap());
+    ui.handle(Key::Char(' '));
+    type_text(&mut ui, "core.plugins");
+    ui.handle(Key::Enter);
+    assert!(frame(&ui).contains("No installed plugins"));
+    ui.handle(Key::Escape);
+    type_text(&mut ui, ",e");
+    assert!(frame(&ui).contains("requires one plugin id"));
+    assert!(!ui.handle(Key::Char('q')));
+}
+
+#[test]
+fn revoking_permission_clears_cached_items_and_reports_the_reason() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("private.txt"), "private content").unwrap();
+    let mut ui = fixture.ui();
+    assert!(frame(&ui).contains("private.txt"));
+    type_text(&mut ui, ",r");
+    ui.handle(Key::Escape);
+    assert!(!frame(&ui).contains("private.txt"));
+    assert!(frame(&ui).contains("WorkspaceRead not granted"));
+    type_text(&mut ui, ",g");
+    ui.handle(Key::Escape);
+    assert!(frame(&ui).contains("private.txt"));
 }

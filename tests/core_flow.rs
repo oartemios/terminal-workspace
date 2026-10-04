@@ -28,6 +28,7 @@ fn action_and_colon_command_share_the_same_execution_path() {
         .invoke(CommandInvocation {
             id: "files.preview".into(),
             item: Some("Cargo.toml".into()),
+            args: Vec::new(),
         })
         .unwrap();
     assert_eq!(from_action, from_command);
@@ -42,12 +43,12 @@ fn session_disable_does_not_change_workspace_activation() {
     let mut app = App::new(workspace()).unwrap();
     app.install(Box::new(FilesPlugin), true).unwrap();
     app.grant("files", Permission::WorkspaceRead).unwrap();
-    app.disable_for_session("files");
+    app.disable_for_session("files").unwrap();
     assert_eq!(app.plugins()[0].status, "session disabled");
     assert!(app.groups("files").is_err());
     app.enable("files").unwrap();
     assert_eq!(app.plugins()[0].status, "active");
-    app.disable("files");
+    app.disable("files").unwrap();
     assert_eq!(app.plugins()[0].status, "workspace disabled");
 }
 

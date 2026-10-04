@@ -9,3 +9,4 @@ terminal-workspace = { path = "../.." }
 
 [dev-dependencies]
 console = "=0.15.7"
+serde_json = "=1.0.108"

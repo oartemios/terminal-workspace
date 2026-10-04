@@ -1,9 +1,10 @@
 use crate::{
     Action, App, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView, Item,
-    Navigation,
+    KeyBinding, Navigation,
 };
 use console::{truncate_str, Key};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -59,13 +60,6 @@ enum Sort {
     Descending,
 }
 
-// Prototype defaults, not part of the Plugin API or product requirements.
-const BINDINGS: &[(&str, &str)] = &[
-    ("fp", "files.preview"),
-    ("fs", "files.path"),
-    ("fo", "files.open"),
-    ("fu", "files.parent"),
-];
 const HELP: &[&str] = &[
     "Tab / Shift-Tab   focus plugins, groups, items",
     "Arrows or h j k l   navigate; Enter advances",
@@ -76,15 +70,28 @@ const HELP: &[&str] = &[
     "/   filter items; Esc clears the filter",
     "s   sort: plugin order / title ascending / descending",
     "r   refresh the current group",
-    "f p   preview; f s   path; f o   open; f u   parent",
+    "Plugin bindings are local; see current bindings below",
+    ", e/d/s   enable / disable / suspend selected plugin",
+    ", p   plugin states; , g/r   grant / revoke WorkspaceRead",
+    "a on Plugins   activation and permission actions",
+    ", w   open Workspace; , b   previous Workspace",
     "PgUp/PgDn, Home/End   scroll list or output",
     "Esc   back; q / Ctrl-C / Ctrl-D   quit",
 ];
 
+#[derive(Clone)]
 struct ListState {
     selected: Option<String>,
     filter: String,
     sort: Sort,
+}
+
+struct WorkspaceUi {
+    plugin: Option<String>,
+    group: Option<String>,
+    location: Option<String>,
+    focus: Focus,
+    history: BTreeMap<(String, String, String), ListState>,
 }
 
 /// Terminal-independent UI state. Every plugin operation ends in App::invoke.
@@ -107,7 +114,10 @@ pub struct Ui {
     mode: Mode,
     filter: String,
     sort: Sort,
-    pending: Option<char>,
+    pending: String,
+    workspaces: BTreeMap<PathBuf, WorkspaceUi>,
+    bindings: Vec<KeyBinding>,
+    binding_errors: Vec<String>,
     message: String,
     page_size: usize,
     list_page_size: usize,
@@ -137,14 +147,25 @@ impl Ui {
             mode: Mode::Normal,
             filter: String::new(),
             sort: Sort::Plugin,
-            pending: None,
+            pending: String::new(),
+            workspaces: BTreeMap::new(),
+            bindings: Vec::new(),
+            binding_errors: Vec::new(),
             message: String::new(),
             page_size: 18,
             list_page_size: 18,
             output_item: None,
         };
         ui.load_groups();
+        ui.update_bindings();
+        if let Some(error) = ui.app.configuration_error() {
+            ui.message = error.into();
+        }
         ui
+    }
+
+    pub fn notify(&mut self, message: String) {
+        self.message = message;
     }
 
     pub fn resize(&mut self, height: usize) {
@@ -193,6 +214,14 @@ impl Ui {
             .map(|item| item.id.clone())
     }
 
+    fn action_context(&self) -> String {
+        if self.focus == Focus::Plugins {
+            self.plugin_id().unwrap_or("No plugins").into()
+        } else {
+            self.selected_item().unwrap_or_default()
+        }
+    }
+
     fn load_groups(&mut self) {
         self.group = 0;
         self.groups.clear();
@@ -211,6 +240,7 @@ impl Ui {
             }
         }
         self.refresh();
+        self.update_bindings();
     }
 
     fn refresh(&mut self) {
@@ -251,6 +281,108 @@ impl Ui {
         self.selected = selected
             .and_then(|id| self.visible_items().iter().position(|item| item.id == id))
             .unwrap_or(0);
+        self.update_bindings();
+    }
+
+    fn update_bindings(&mut self) {
+        self.bindings =
+            self.app
+                .keybindings(self.plugin_id(), self.group_id(), self.location.as_deref());
+        self.binding_errors = self.app.binding_diagnostics();
+        self.pending.clear();
+    }
+
+    fn keyboard_help(&self) -> Vec<String> {
+        let mut help: Vec<String> = HELP.iter().map(|line| (*line).into()).collect();
+        help.push("Current context bindings:".into());
+        help.extend(self.bindings.iter().map(|binding| {
+            format!(
+                "{}   {}",
+                binding
+                    .keys
+                    .chars()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                binding.command_id
+            )
+        }));
+        help.extend(
+            self.binding_errors
+                .iter()
+                .map(|error| format!("Binding error: {error}")),
+        );
+        help.push("Esc   back; q / Ctrl-C / Ctrl-D   quit".into());
+        help
+    }
+
+    fn pending_hint(&self) -> String {
+        let continuations = self
+            .bindings
+            .iter()
+            .filter_map(|binding| {
+                binding
+                    .keys
+                    .strip_prefix(&self.pending)
+                    .map(|suffix| format!("{suffix}: {}", binding.command_id))
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        format!("{} … {continuations}  Esc: cancel", self.pending)
+    }
+
+    fn workspace_state(&mut self) -> WorkspaceUi {
+        self.remember_location();
+        WorkspaceUi {
+            plugin: self.plugin_id().map(str::to_owned),
+            group: self.group_id().map(str::to_owned),
+            location: self.location.clone(),
+            focus: self.focus,
+            history: self.history.clone(),
+        }
+    }
+
+    fn restore_workspace(&mut self) {
+        self.history.clear();
+        self.filter.clear();
+        self.sort = Sort::Plugin;
+        self.output_item = None;
+        self.pending.clear();
+        self.plugin = 0;
+        self.focus = Focus::Items;
+        let saved = self.workspaces.remove(self.app.workspace().root());
+        if let Some(state) = &saved {
+            self.plugin = state
+                .plugin
+                .as_ref()
+                .and_then(|id| self.plugin_ids.iter().position(|p| p == id))
+                .unwrap_or(0);
+        }
+        self.load_groups();
+        if let Some(state) = saved {
+            self.history = state.history;
+            self.focus = state.focus;
+            if let (Some(plugin), Some(group), Some(location)) =
+                (state.plugin, state.group, state.location)
+            {
+                if self.app.groups(&plugin).is_ok() {
+                    if let Err(error) = self.open_location_inner(
+                        &plugin,
+                        Navigation {
+                            group,
+                            location,
+                            selected: None,
+                        },
+                        false,
+                    ) {
+                        // Stale locations fall back to the root loaded above.
+                        self.message = error;
+                    }
+                    self.focus = state.focus;
+                }
+            }
+        }
+        self.update_bindings();
     }
 
     fn remember_location(&mut self) {
@@ -268,6 +400,15 @@ impl Ui {
     }
 
     fn open_location(&mut self, owner: &str, navigation: Navigation) -> Result<(), String> {
+        self.open_location_inner(owner, navigation, true)
+    }
+
+    fn open_location_inner(
+        &mut self,
+        owner: &str,
+        navigation: Navigation,
+        remember: bool,
+    ) -> Result<(), String> {
         let plugin = self
             .plugin_ids
             .iter()
@@ -282,7 +423,9 @@ impl Ui {
         let view = self
             .app
             .view(owner, &navigation.group, Some(&navigation.location))?;
-        self.remember_location();
+        if remember {
+            self.remember_location();
+        }
         let key = (owner.to_owned(), navigation.group, view.location.clone());
         let saved = self.history.get(&key);
         self.filter = saved.map_or(String::new(), |state| state.filter.clone());
@@ -321,6 +464,24 @@ impl Ui {
     }
 
     fn invocation(&self, id: String, explicit_item: Option<String>) -> CommandInvocation {
+        if id.starts_with("core.") {
+            let args = if matches!(
+                id.as_str(),
+                "core.plugins" | "core.workspace.open" | "core.workspace.previous"
+            ) {
+                explicit_item.into_iter().collect()
+            } else {
+                explicit_item
+                    .or_else(|| self.plugin_id().map(str::to_owned))
+                    .into_iter()
+                    .collect()
+            };
+            return CommandInvocation {
+                id,
+                item: None,
+                args,
+            };
+        }
         if explicit_item.is_none() {
             if let Some(default) = self
                 .command_defaults
@@ -340,15 +501,53 @@ impl Ui {
                 })
                 .and_then(|_| self.selected_item())
         });
-        CommandInvocation { id, item }
+        CommandInvocation {
+            id,
+            item,
+            args: Vec::new(),
+        }
     }
 
     fn execute(&mut self, invocation: CommandInvocation) {
+        if invocation.id == "core.workspace.open" && invocation.args.is_empty() {
+            self.mode = Mode::Command("core.workspace.open ".into());
+            return;
+        }
+        let workspace_change = invocation.id.starts_with("core.workspace.");
+        let previous = if workspace_change {
+            Some((
+                self.app.workspace().root().to_owned(),
+                self.workspace_state(),
+            ))
+        } else {
+            None
+        };
+        let changes_state = matches!(
+            invocation.id.as_str(),
+            "core.plugin.enable"
+                | "core.plugin.disable"
+                | "core.plugin.suspend"
+                | "core.permission.grant-read"
+                | "core.permission.revoke-read"
+        );
         let owner = self.app.command_owner(&invocation.id).map(str::to_owned);
         let output_item = invocation.item.clone();
         match self.app.invoke(invocation) {
+            Ok(CommandOutcome::WorkspaceChanged) => {
+                if let Some((root, state)) = previous {
+                    self.workspaces.insert(root, state);
+                }
+                self.mode = Mode::Normal;
+                self.restore_workspace();
+            }
             Ok(CommandOutcome::Output(block)) => {
-                self.message.clear();
+                if changes_state {
+                    self.history.clear();
+                    self.filter.clear();
+                    self.load_groups();
+                } else {
+                    self.message.clear();
+                }
                 self.output_item = output_item;
                 self.mode = Mode::Output { block, offset: 0 };
             }
@@ -367,6 +566,24 @@ impl Ui {
     }
 
     fn show_actions(&mut self) {
+        if self.focus == Focus::Plugins {
+            let entries = self
+                .commands
+                .iter()
+                .filter(|command| command.id.starts_with("core.") && command.id != "core.plugins")
+                .map(|command| Action {
+                    label: command.title.clone(),
+                    command_id: command.id.clone(),
+                    invocation: self.invocation(command.id.clone(), None),
+                    is_default: false,
+                })
+                .collect();
+            self.mode = Mode::Actions {
+                entries,
+                selected: 0,
+            };
+            return;
+        }
         if let (Some(plugin), Some(group), Some(item)) =
             (self.plugin_id(), self.group_id(), self.selected_item())
         {
@@ -442,6 +659,7 @@ impl Ui {
                     self.parent = None;
                     self.command_defaults.clear();
                     self.refresh();
+                    self.update_bindings();
                 }
             }
             Focus::Items => {
@@ -459,15 +677,34 @@ impl Ui {
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         match mode {
             Mode::Normal => {
-                if let Some(prefix) = self.pending.take() {
-                    if let Key::Char(suffix) = key {
-                        let sequence = format!("{prefix}{suffix}");
-                        match BINDINGS.iter().find(|(keys, _)| *keys == sequence) {
-                            Some((_, id)) => self.execute(self.invocation((*id).into(), None)),
-                            None => {
-                                self.message = format!("Unknown key sequence: {prefix} {suffix}")
-                            }
+                if !self.pending.is_empty()
+                    || matches!(&key, Key::Char(c) if self.bindings.iter().any(|b| b.keys.starts_with(*c)))
+                {
+                    if key == Key::Escape {
+                        self.pending.clear();
+                        self.message.clear();
+                        return true;
+                    }
+                    if let Key::Char(character) = key {
+                        self.pending.push(character);
+                        if let Some(binding) = self
+                            .bindings
+                            .iter()
+                            .find(|binding| binding.keys == self.pending)
+                        {
+                            let id = binding.command_id.clone();
+                            self.pending.clear();
+                            self.execute(self.invocation(id, None));
+                        } else if !self
+                            .bindings
+                            .iter()
+                            .any(|binding| binding.keys.starts_with(&self.pending))
+                        {
+                            self.message = format!("Unknown key sequence: {}", self.pending);
+                            self.pending.clear();
                         }
+                    } else {
+                        self.pending.clear();
                     }
                     return true;
                 }
@@ -487,7 +724,6 @@ impl Ui {
                     }
                     Key::Char('?') => self.mode = Mode::Help { offset: 0 },
                     Key::Char('a') => self.show_actions(),
-                    Key::Char('f') => self.pending = Some('f'),
                     Key::Char('r') => {
                         self.load_groups_preserving_selection();
                     }
@@ -660,7 +896,7 @@ impl Ui {
                 self.mode = Mode::Output { block, offset };
             }
             Mode::Help { mut offset } => {
-                let max_offset = HELP.len().saturating_sub(self.page_size);
+                let max_offset = self.keyboard_help().len().saturating_sub(self.page_size);
                 match key {
                     Key::Char('q') => return false,
                     Key::Escape | Key::Enter | Key::Char('?') => return true,
@@ -757,7 +993,7 @@ impl Ui {
                     )
                 }
                 Mode::Actions { entries, selected } => (
-                    format!("Actions | {}", self.selected_item().unwrap_or_default()),
+                    format!("Actions | {}", self.action_context()),
                     entries
                         .iter()
                         .map(|action| format!("{} — {}", action.label, action.command_id))
@@ -789,10 +1025,7 @@ impl Ui {
                 ),
                 Mode::Help { offset } => (
                     "Keyboard help (prototype defaults)".into(),
-                    HELP.iter()
-                        .skip(*offset)
-                        .map(|line| (*line).to_owned())
-                        .collect(),
+                    self.keyboard_help().into_iter().skip(*offset).collect(),
                     None,
                 ),
             };
@@ -814,10 +1047,11 @@ impl Ui {
             rows[height - 2].0 = match &self.mode {
                 Mode::Command(input) => format!(":{input}_"),
                 Mode::Search { .. } => format!("/{}_", self.filter),
-                _ if self.pending.is_some() => {
-                    "f … o: open  p: preview  s: path  u: parent  Esc: cancel".into()
-                }
+                _ if !self.pending.is_empty() => self.pending_hint(),
                 _ if !self.message.is_empty() => format!("Error: {}", self.message),
+                _ if !self.binding_errors.is_empty() => {
+                    format!("Bindings: {} (? for details)", self.binding_errors[0])
+                }
                 _ => format!(
                     "{:?} | {} | filter: {}",
                     self.focus,
@@ -952,7 +1186,7 @@ impl Ui {
 
         let (heading, content, selection) = match &self.mode {
             Mode::Actions { entries, selected } => (
-                format!("Actions | {}", self.selected_item().unwrap_or_default()),
+                format!("Actions | {}", self.action_context()),
                 entries
                     .iter()
                     .map(|action| format!("{} — {}", action.label, action.command_id))
@@ -984,16 +1218,20 @@ impl Ui {
             ),
             Mode::Help { offset } => (
                 "Keyboard help (prototype defaults)".into(),
-                HELP.iter()
-                    .skip(*offset)
-                    .map(|line| (*line).to_owned())
-                    .collect(),
+                self.keyboard_help().into_iter().skip(*offset).collect(),
                 None,
             ),
             _ => (
                 selected.map_or("Selection".into(), |item| item.title.clone()),
                 selected.map_or_else(
-                    || vec!["No entries".into()],
+                    || {
+                        vec![
+                            "No entries".into(),
+                            "Space   command palette".into(),
+                            ", e     enable selected plugin".into(),
+                            "Tab, a  plugin actions".into(),
+                        ]
+                    },
                     |item| {
                         vec![
                             format!("Kind: {}", item.kind),
@@ -1130,10 +1368,11 @@ impl Ui {
         let status = match &self.mode {
             Mode::Command(input) => format!(":{input}_"),
             Mode::Search { .. } => format!("/{}_", self.filter),
-            _ if self.pending.is_some() => {
-                "f … o: open  p: preview  s: path  u: parent  Esc: cancel".into()
-            }
+            _ if !self.pending.is_empty() => self.pending_hint(),
             _ if !self.message.is_empty() => format!("Error: {}", self.message),
+            _ if !self.binding_errors.is_empty() => {
+                format!("Bindings: {} (? for details)", self.binding_errors[0])
+            }
             _ => format!(
                 "{:?} | {} | filter: {}",
                 self.focus,
