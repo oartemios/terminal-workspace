@@ -6,29 +6,32 @@
 
 ## Установка готовой сборки
 
-Открой [GitHub Actions → Build and test](https://github.com/oartemios/terminal-workspace/actions/workflows/build.yml), выбери успешный запуск для нужного commit и скачай соответствующий artifact. Для скачивания через веб-интерфейс нужно войти в GitHub. Внешний ZIP содержит `.tar.gz` и файл SHA-256; артефакты хранятся 30 дней. PR-сборки подходят для проверки изменений, сборки `main` — для установки после merge.
+Открой [GitHub Actions → Build and test](https://github.com/oartemios/terminal-workspace/actions/workflows/build.yml), выбери успешный запуск для нужного commit и скачай соответствующий artifact. Имя содержит версию и платформу: `terminal-workspace-<build-version>-<target>`. Для скачивания через веб-интерфейс нужно войти в GitHub. Внешний ZIP содержит `.tar.gz` и файл SHA-256; артефакты хранятся 30 дней. PR/main используют `0.1.0+dev.<commit>`, тег `v0.1.0` — `0.1.0`. Правила версий и выпуска: [versioning](docs/versioning.md), изменения: [changelog](CHANGELOG.md).
 
 | Компьютер | Artifact |
 | --- | --- |
-| macOS Apple Silicon (macOS 11+) | `terminal-workspace-aarch64-apple-darwin` |
-| macOS Intel (macOS 11+) | `terminal-workspace-x86_64-apple-darwin` |
-| Linux x86_64 (glibc 2.35+, например Ubuntu 22.04+) | `terminal-workspace-x86_64-unknown-linux-gnu` |
-| Linux ARM64 (glibc 2.35+, например Ubuntu 22.04+) | `terminal-workspace-aarch64-unknown-linux-gnu` |
+| macOS Apple Silicon (macOS 11+) | `aarch64-apple-darwin` |
+| macOS Intel (macOS 11+) | `x86_64-apple-darwin` |
+| Linux x86_64 (glibc 2.35+, например Ubuntu 22.04+) | `x86_64-unknown-linux-gnu` |
+| Linux ARM64 (glibc 2.35+, например Ubuntu 22.04+) | `aarch64-unknown-linux-gnu` |
 
 Это отдельные нативные сборки. Windows пока требует WSL с подходящим Linux artifact; native Windows и Alpine/musl не поддерживаются текущим Unix runtime. На машине не нужен Rust. Для Git-плагина нужен установленный `git`; Python требуется только разработчикам для тестов. macOS-сборки не notarized; фактическая CI-проверка выполняется на macOS 14/15, совместимость с более старыми версиями задаётся deployment target, но там пока не проверена.
 
 После распаковки скачанного ZIP в терминале выполни (пример для Apple Silicon):
 
 ```sh
-shasum -a 256 -c terminal-workspace-aarch64-apple-darwin.tar.gz.sha256
-tar -xzf terminal-workspace-aarch64-apple-darwin.tar.gz
-cd terminal-workspace-aarch64-apple-darwin
+build_version='0.1.0+dev.abcdef012345' # замени на версию скачанной сборки
+archive="terminal-workspace-$build_version-aarch64-apple-darwin"
+shasum -a 256 -c "$archive.tar.gz.sha256"
+tar -xzf "$archive.tar.gz"
+cd "$archive"
 sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
+tw --version
 tw /путь/к/проекту
 ```
 
-Добавь строку `export PATH="$HOME/.local/bin:$PATH"` в конфигурацию своей оболочки (`~/.zshrc` или `~/.bashrc`), чтобы команда оставалась доступной. По умолчанию installer помещает `tw` в `~/.local/bin`, без sudo; другой prefix: `sh install.sh /выбранный/prefix`. Installer проверяет ОС/архитектуру и заменяет прежний бинарник. Можно также запускать `./tw` прямо из распакованного каталога. `TARGET` содержит платформу, `COMMIT` — ревизию исходников.
+Добавь строку `export PATH="$HOME/.local/bin:$PATH"` в конфигурацию своей оболочки (`~/.zshrc` или `~/.bashrc`), чтобы команда оставалась доступной. По умолчанию installer помещает `tw` в `~/.local/bin`, без sudo; другой prefix: `sh install.sh /выбранный/prefix`. Installer проверяет ОС/архитектуру и заменяет прежний бинарник. Можно также запускать `./tw` прямо из распакованного каталога. `TARGET` содержит платформу, `COMMIT` — ревизию исходников, `VERSION` / `BUILD_VERSION` — версию приложения и сборки.
 
 Обновление выполняется установкой нового архива. Глобально установленные копии executable плагинов обновляются отдельно: bootstrap не заменяет существующую установку. Закрой TUI, создай новый пакет Files/Git командами `tw plugins package-files` / `package-git`, удали старый пакет через `tw plugins uninstall files` / `git`, затем выполни `tw plugins install /путь/к/новому/пакету` и `tw plugins trust files` / `git` (см. ниже). Настройки Workspace сохраняются. Для удаления приложения удали установленный `tw`; настройки и глобальный каталог плагинов управляются отдельно.
 

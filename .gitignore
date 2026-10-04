@@ -1,5 +1,6 @@
 /target/
 /dist/
+__pycache__/
 /examples/custom-plugin/target/
 /.terminal-workspace.json
 /.terminal-workspace.json.tmp-*

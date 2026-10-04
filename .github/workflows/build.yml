@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -52,6 +53,11 @@ jobs:
           test "$(rustc -vV | sed -n 's/^host: //p')" = '${{ matrix.target }}'
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Validate version and release tag
+        id: version
+        run: python3 scripts/version.py
+      - name: Test versioning rules
+        run: python3 tests/versioning.py
       - name: Initialize system Git
         run: /usr/bin/git --version
       - name: Lint
@@ -67,11 +73,13 @@ jobs:
       - name: Verify archive and local installation
         run: |
           cd dist
-          shasum -a 256 -c terminal-workspace-${{ matrix.target }}.tar.gz.sha256
+          name='terminal-workspace-${{ steps.version.outputs.build_version }}-${{ matrix.target }}'
+          shasum -a 256 -c "$name.tar.gz.sha256"
           mkdir extracted
-          tar -xzf terminal-workspace-${{ matrix.target }}.tar.gz -C extracted
-          sh extracted/terminal-workspace-${{ matrix.target }}/install.sh "$RUNNER_TEMP/tw-install"
+          tar -xzf "$name.tar.gz" -C extracted
+          sh "extracted/$name/install.sh" "$RUNNER_TEMP/tw-install"
           test -x "$RUNNER_TEMP/tw-install/bin/tw"
+          test "$("$RUNNER_TEMP/tw-install/bin/tw" --version)" = 'tw ${{ steps.version.outputs.version }}'
       - name: Test installed release in a terminal
         env:
           TW_TEST_BINARY: ${{ runner.temp }}/tw-install/bin/tw
@@ -79,9 +87,9 @@ jobs:
       - name: Upload installable archive
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: terminal-workspace-${{ matrix.target }}
+          name: terminal-workspace-${{ steps.version.outputs.build_version }}-${{ matrix.target }}
           path: |
-            dist/*.tar.gz
-            dist/*.sha256
+            dist/terminal-workspace-${{ steps.version.outputs.build_version }}-${{ matrix.target }}.tar.gz
+            dist/terminal-workspace-${{ steps.version.outputs.build_version }}-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 30
