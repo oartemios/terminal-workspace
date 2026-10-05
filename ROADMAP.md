@@ -23,23 +23,23 @@
 | Workspace и активация | Project-local настройки и permissions, постоянное и временное отключение; проверены restart, ошибки конфигурации и независимость проектов. | [Решение 0003](docs/decisions/0003-workspace-configuration.md) |
 | Переключение Workspace и ввод | Восстановление контекста в сессии, scoped multi-key bindings и overrides; Files и custom Catalog проверены в двух Workspaces, включая общий маршрут команд и текстовый ввод. | [Решение 0004](docs/decisions/0004-workspace-switching-and-bindings.md), [defaults клавиш](docs/decisions/0005-keyboard-defaults.md) |
 | Пакеты, runtime и permissions | Глобальная установка, discovery, trust, lifecycle и uninstall executable plugins; проверены custom plugin, отказы permissions, сбои, таймауты и завершение процессов. | [Решение 0006](docs/decisions/0006-executable-plugin-runtime.md), [протокол](docs/plugin-protocol.md) |
-| Files и просмотр output | Browse, вложенная навигация, фильтр, сортировка, refresh и preview; общий viewer с поиском, переходом к строке и базовым Markdown/source. Проверены командные маршруты, Unicode, resize и PTY. | [Решение 0008](docs/decisions/0008-output-viewer.md), [Plugin API 0.5](docs/plugin-api.md) |
+| Files и просмотр output | Browse, вложенная навигация, фильтр, сортировка, refresh и preview; общий viewer с поиском, переходом к строке и базовым Markdown/source. Проверены командные маршруты, Unicode, resize и PTY. | [Решение 0008](docs/decisions/0008-output-viewer.md), [Plugin API 0.6](docs/plugin-api.md) |
 | Git | Устанавливаемый read-only плагин: Status, Branches, diff и сведения о ветке. Проверены два репозитория, четыре маршрута команд, пустые группы, специальные пути и доступность Files после ошибки Git. | [Решение 0007](docs/decisions/0007-read-only-git-plugin.md) |
+| [#4 — Неблокирующий runtime](https://github.com/oartemios/terminal-workspace/issues/4) | Executable startup/handshake, view, Actions, команды и restart идут в фоне; проверены responsiveness, cancellation, late results и custom plugin. | [Решение 0010](docs/decisions/0010-background-plugin-runtime.md) |
 | Сборки и установка | CI для Linux/macOS на x86_64/ARM64, устанавливаемые архивы и версии сборок; workflow включает Rust/custom-plugin проверки и PTY установленного release-бинарника. | [Решение 0009](docs/decisions/0009-ci-artifacts.md), [версии и выпуск](docs/versioning.md) |
 
-Это прототип. GitHub и асинхронное обновление ещё не реализованы; Files/Git пока находятся в основном crate. Requests синхронны с deadline, поэтому медленный worker может задерживать TUI. Native executable требует trust и не изолирован OS sandbox: host проверяет объявленные permissions, но не ограничивает весь прямой доступ процесса к ОС. Производительность по целям MVP пока не подтверждена. Актуальные пользовательские ограничения описаны в [README](README.md).
+Это прототип. GitHub, кэш и refresh strategies ещё не реализованы; Files/Git пока находятся в основном crate. Production TUI выполняет executable requests в фоне с deadline; linked SDK default остаётся синхронным. Native executable требует trust и не изолирован OS sandbox: host проверяет объявленные permissions, но не ограничивает весь прямой доступ процесса к ОС. Производительность по целям MVP пока не подтверждена. Актуальные пользовательские ограничения описаны в [README](README.md).
 
 ## Ближайшие этапы — P0
 
 | Этап | Пользовательский результат | Зависимости |
 | --- | --- | --- |
-| [#4 — Неблокирующий runtime](https://github.com/oartemios/terminal-workspace/issues/4) | Навигация и Files остаются отзывчивыми при медленном startup/handshake, первоначальной загрузке групп и фоновых операциях. Отмена и проверка поколения не допускают результатов старого Workspace. | Следующая задача. |
-| [#5 — Кэш и refresh](https://github.com/oartemios/terminal-workspace/issues/5) | Кэш показывается сразу, обновление идёт в фоне; видны stale/offline/error состояния. | После #4. Manual/on-focus/interval refresh не требуют #9; событийный refresh отложен до event bus. |
+| [#5 — Кэш и refresh](https://github.com/oartemios/terminal-workspace/issues/5) | Кэш показывается сразу, обновление идёт в фоне; видны stale/offline/error состояния. | Следующая задача после выполненного #4. Manual/on-focus/interval refresh не требуют #9; событийный refresh отложен до event bus. |
 | [#7 — Отделение first-party плагинов от Core](https://github.com/oartemios/terminal-workspace/issues/7) | Files/Git и публичная SDK/runtime граница отделены; новый сетевой плагин использует тот же доступный custom plugins путь. | До реализации #6; можно выполнять независимо от #4/#5. Точный layout выбирается при реализации. |
 | [#6 — GitHub: PR и Issues](https://github.com/oartemios/terminal-workspace/issues/6) | Нативные PR/Issue, клавиатурные Actions, явная авторизация и permissions; slow/offline/auth ошибки не мешают локальной работе. | После #4, #5 и #7. |
 | [#15 — Сквозная приёмка MVP](https://github.com/oartemios/terminal-workspace/issues/15) | Files/Git/GitHub/custom plugin проходят полный keyboard-only lifecycle в нескольких Workspaces; проверки, ограничения и решение о выпуске зафиксированы. | После предыдущих P0; использует измерения #12. |
 
-Основная последовательность: **#4 → #5 → #6 → #15**, с дополнительной обязательной зависимостью **#7 → #6**. Доменные данные и логика остаются у плагинов; Core предоставляет общий runtime, отмену, scheduling, permissions и отображение состояния.
+Оставшаяся последовательность после #4: **#5 → #6 → #15**, с дополнительной обязательной зависимостью **#7 → #6**. Доменные данные и логика остаются у плагинов; Core предоставляет общий runtime, отмену, scheduling, permissions и отображение состояния.
 
 ## Архитектура, UX и качество — P1
 

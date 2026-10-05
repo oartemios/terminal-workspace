@@ -1,6 +1,6 @@
 # Executable plugin protocol v1
 
-Package format 1 и source Plugin API 0.5. Реализация: `src/runtime/`; ограничения/trust/enforcement описаны в [решении runtime](decisions/0006-executable-plugin-runtime.md).
+Package format 1 и source Plugin API 0.6. Реализация: `src/runtime/`; ограничения/trust/enforcement описаны в [решении runtime](decisions/0006-executable-plugin-runtime.md).
 
 ## Пакет
 
@@ -10,7 +10,7 @@ Package format 1 и source Plugin API 0.5. Реализация: `src/runtime/`;
 {
   "package_version": 1,
   "protocol_version": 1,
-  "api_version": "0.5",
+  "api_version": "0.6",
   "executable": "plugin",
   "args": [],
   "environment": [],
@@ -112,6 +112,8 @@ Author implements `Plugin`, затем worker entrypoint вызывает `runti
 
 API 0.4 добавляет serde DTO, категории permissions, `start(workspace, permissions)`, `stop`, `try_actions`, `runtime_status`, `installation_present`. Defaults совместимы с простыми linked implementations; id/name могут возвращать borrowed `&str`. Hooks start должны быть идемпотентными: Core/SDK могут вызвать их перед предметной операцией. `try_actions` позволяет вернуть диагностируемую ошибку вместо panic. Runtime-specific status не обязывает плагин иметь доменную connection.
 
-Host start для ProcessPlugin запускает worker; SDK вызывает native plugin start перед view/actions/execute. Stop процесса — жёсткое завершение группы; native cleanup hooks не гарантированы. Для linked доверенного SDK usage Core вызывает stop hook, но не может уничтожить произвольные native threads. Внешний контракт остаётся draft, capabilities optional, фоновые задачи/events/refresh strategies появятся отдельно.
+Host polling для ProcessPlugin запускает worker и handshake вне TUI-потока; synchronous SDK path сохраняется; SDK вызывает native plugin start перед view/actions/execute. Stop процесса — жёсткое завершение группы; native cleanup hooks не гарантированы. Для linked доверенного SDK usage Core вызывает stop hook, но не может уничтожить произвольные native threads. Внешний контракт остаётся draft, capabilities optional, events/refresh strategies появятся отдельно.
 
 API 0.5: Output Block может содержать `"format":"Text"` или `"format":"Markdown"`; отсутствие поля в API 0.4 ответах означает Text. Content содержит исходный текст без ANSI. Host 0.5 принимает manifests 0.4 и 0.5. Плагины не возвращают Core-only `View` outcomes; это механизм маршрутизации команд viewer внутри host.
+
+API 0.6: неблокирующий host scheduling использует те же describe/view/actions/execute messages и deadlines; wire protocol остаётся 1. Host принимает API 0.4/0.5/0.6. Один executable worker обслуживает последовательные requests; completion и cancellation реализованы host, unsolicited replies или native threads в plugin не требуются. Startup/handshake и начальная view загрузка также идут в фоне. Details: [polling contract](plugin-api.md#api-06-polling-фоновой-работы), [решение 0010](decisions/0010-background-plugin-runtime.md).

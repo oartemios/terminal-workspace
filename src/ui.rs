@@ -1,3 +1,4 @@
+use crate::runtime::{BackgroundRequest, BackgroundResponse};
 use crate::{
     Action, App, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView, Item,
     KeyBinding, Navigation, ViewRequest,
@@ -7,6 +8,32 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::task::Poll;
+
+#[derive(Clone)]
+enum WorkKind {
+    Refresh {
+        selected: Option<String>,
+    },
+    Navigate {
+        navigation: Navigation,
+        remember: bool,
+    },
+    Actions {
+        activate: bool,
+        item: String,
+    },
+    Execute {
+        invocation: CommandInvocation,
+    },
+}
+struct PendingWork {
+    owner: String,
+    request: BackgroundRequest,
+    kind: WorkKind,
+    root: PathBuf,
+    epoch: u64,
+}
 
 struct OutputLayout {
     key: (usize, usize, crate::ContentFormat, bool, usize),
@@ -37,6 +64,7 @@ impl Focus {
     }
 }
 
+#[derive(Clone)]
 enum Mode {
     Normal,
     Actions {
@@ -107,9 +135,11 @@ struct WorkspaceUi {
     history: BTreeMap<(String, String, String), ListState>,
 }
 
-/// Terminal-independent UI state. Every plugin operation ends in App::invoke.
+/// Terminal-independent UI state. Commands use the shared App CommandRegistry route.
 pub struct Ui {
     app: App,
+    work: Option<PendingWork>,
+    epoch: u64,
     plugin_ids: Vec<String>,
     plugin: usize,
     groups: Vec<Group>,
@@ -158,6 +188,8 @@ impl Ui {
         let commands = app.commands().into_iter().cloned().collect();
         let mut ui = Self {
             app,
+            work: None,
+            epoch: 0,
             plugin_ids,
             plugin,
             groups: Vec::new(),
@@ -529,6 +561,7 @@ impl Ui {
     }
 
     fn load_groups(&mut self) {
+        self.invalidate_work();
         self.group = 0;
         self.groups.clear();
         self.items.clear();
@@ -550,19 +583,110 @@ impl Ui {
     }
 
     fn refresh(&mut self) {
-        let previous = self.selected_item();
+        let selected = self.selected_item();
         if let (Some(plugin), Some(group)) = (self.plugin_id(), self.group_id()) {
-            match self.app.view(plugin, group, self.location.as_deref()) {
-                Ok(view) => {
-                    self.apply_view(view, previous);
-                    self.message.clear();
+            self.submit_work(
+                plugin.to_owned(),
+                BackgroundRequest::View {
+                    group: group.to_owned(),
+                    location: self.location.clone(),
+                },
+                WorkKind::Refresh { selected },
+            );
+        }
+    }
+
+    fn invalidate_work(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.work = None;
+    }
+
+    fn submit_work(&mut self, owner: String, request: BackgroundRequest, kind: WorkKind) {
+        self.work = Some(PendingWork {
+            owner,
+            request,
+            kind,
+            root: self.app.workspace().root().to_owned(),
+            epoch: self.epoch,
+        });
+        self.tick();
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        self.work.is_some()
+    }
+
+    /// Poll bounded host work without waiting for plugin pipes or a handshake.
+    pub fn tick(&mut self) -> bool {
+        let Some(work) = self.work.take() else {
+            return false;
+        };
+        if work.root != self.app.workspace().root() || work.epoch != self.epoch {
+            return false;
+        }
+        let poll = match &work.kind {
+            WorkKind::Execute { invocation } => self
+                .app
+                .poll_invoke(invocation.clone())
+                .map(|result| result.map(BackgroundResponse::Executed)),
+            _ => self.app.poll_background(&work.owner, &work.request),
+        };
+        match poll {
+            Poll::Pending => {
+                self.work = Some(work);
+                false
+            }
+            Poll::Ready(Err(error)) => {
+                self.message = error;
+                if !matches!(work.kind, WorkKind::Refresh { .. }) {
+                    self.cancel_command();
                 }
-                Err(error) => {
-                    self.items.clear();
-                    self.item_icons.clear();
-                    self.selected = 0;
-                    self.message = error;
+                true
+            }
+            Poll::Ready(Ok(response)) => {
+                match (work.kind, response) {
+                    (WorkKind::Refresh { selected }, BackgroundResponse::View(view)) => {
+                        self.apply_view(view, selected);
+                        self.message.clear();
+                    }
+                    (
+                        WorkKind::Navigate {
+                            navigation,
+                            remember,
+                        },
+                        BackgroundResponse::View(view),
+                    ) => match self.finish_location(&work.owner, navigation, remember, view) {
+                        Ok(()) => self.message.clear(),
+                        Err(error) => self.message = error,
+                    },
+                    (
+                        WorkKind::Actions { activate, item },
+                        BackgroundResponse::Actions {
+                            actions: entries, ..
+                        },
+                    ) => {
+                        if self.selected_item().as_deref() == Some(&item)
+                            && matches!(self.mode, Mode::Normal)
+                        {
+                            self.message.clear();
+                            if let Some(action) =
+                                entries.iter().find(|action| activate && action.is_default)
+                            {
+                                self.execute(action.invocation.clone());
+                            } else {
+                                self.mode = Mode::Actions {
+                                    entries,
+                                    selected: 0,
+                                };
+                            }
+                        }
+                    }
+                    (WorkKind::Execute { invocation }, BackgroundResponse::Executed(outcome)) => {
+                        self.finish_execution(invocation, Ok(outcome));
+                    }
+                    _ => self.message = "Unexpected background response".into(),
                 }
+                true
             }
         }
     }
@@ -723,6 +847,32 @@ impl Ui {
         navigation: Navigation,
         remember: bool,
     ) -> Result<(), String> {
+        self.app
+            .groups(owner)?
+            .iter()
+            .find(|group| group.id == navigation.group)
+            .ok_or("Unknown navigation group")?;
+        self.submit_work(
+            owner.into(),
+            BackgroundRequest::View {
+                group: navigation.group.clone(),
+                location: Some(navigation.location.clone()),
+            },
+            WorkKind::Navigate {
+                navigation,
+                remember,
+            },
+        );
+        Ok(())
+    }
+
+    fn finish_location(
+        &mut self,
+        owner: &str,
+        navigation: Navigation,
+        remember: bool,
+        view: GroupView,
+    ) -> Result<(), String> {
         let plugin = self
             .plugin_ids
             .iter()
@@ -733,10 +883,6 @@ impl Ui {
             .iter()
             .position(|group| group.id == navigation.group)
             .ok_or("Unknown navigation group")?;
-        // Load before changing state: a failed transition leaves the current list intact.
-        let view = self
-            .app
-            .view(owner, &navigation.group, Some(&navigation.location))?;
         if remember {
             self.remember_location();
         }
@@ -869,15 +1015,73 @@ impl Ui {
             return;
         }
 
-        let workspace_change = invocation.id.starts_with("core.workspace.");
-        let previous = if workspace_change {
-            Some((
+        let owner = match self.app.validate_invocation(&invocation) {
+            Ok(owner) => owner.map(str::to_owned),
+            Err(error) => {
+                self.message = error;
+                self.cancel_command();
+                return;
+            }
+        };
+        if let Some(owner) = owner.or_else(|| {
+            (invocation.id == "core.plugin.restart" && invocation.args.len() == 1)
+                .then(|| invocation.args[0].clone())
+        }) {
+            if let Some(previous) = &self.input_return {
+                self.mode = previous.clone();
+            }
+            self.submit_work(
+                owner,
+                BackgroundRequest::Execute(invocation.clone()),
+                WorkKind::Execute { invocation },
+            );
+            return;
+        }
+        let previous_work = self.work.take();
+        let previous_epoch = self.epoch;
+        self.invalidate_work();
+        let previous = invocation.id.starts_with("core.workspace.").then(|| {
+            (
                 self.app.workspace().root().to_owned(),
                 self.workspace_state(),
-            ))
-        } else {
-            None
-        };
+            )
+        });
+        let result = self.app.invoke(invocation.clone());
+        if result.is_err()
+            || !matches!(
+                invocation.id.as_str(),
+                "core.workspace.open"
+                    | "core.workspace.previous"
+                    | "core.plugin.enable"
+                    | "core.plugin.disable"
+                    | "core.plugin.suspend"
+                    | "core.permission.grant-read"
+                    | "core.permission.revoke-read"
+                    | "core.permission.grant"
+                    | "core.permission.revoke"
+                    | "core.plugin.install"
+                    | "core.plugins.discover"
+                    | "core.plugin.trust"
+                    | "core.plugin.untrust"
+                    | "core.plugin.uninstall"
+            )
+        {
+            self.work = previous_work;
+            self.epoch = previous_epoch;
+        }
+        if matches!(result, Ok(CommandOutcome::WorkspaceChanged)) {
+            if let Some((root, state)) = previous {
+                self.workspaces.insert(root, state);
+            }
+        }
+        self.finish_execution(invocation, result);
+    }
+
+    fn finish_execution(
+        &mut self,
+        invocation: CommandInvocation,
+        result: Result<CommandOutcome, String>,
+    ) {
         let changes_state = matches!(
             invocation.id.as_str(),
             "core.plugin.enable"
@@ -896,12 +1100,9 @@ impl Ui {
         );
         let owner = self.app.command_owner(&invocation.id).map(str::to_owned);
         let output_item = invocation.item.clone();
-        match self.app.invoke(invocation) {
+        match result {
             Ok(CommandOutcome::WorkspaceChanged) => {
                 self.input_return = None;
-                if let Some((root, state)) = previous {
-                    self.workspaces.insert(root, state);
-                }
                 self.mode = Mode::Normal;
                 self.restore_workspace();
             }
@@ -967,46 +1168,26 @@ impl Ui {
             };
             return;
         }
-        if let (Some(plugin), Some(group), Some(item)) =
-            (self.plugin_id(), self.group_id(), self.selected_item())
-        {
-            match self
-                .app
-                .actions_at(plugin, group, self.location.as_deref(), &item)
-            {
-                Ok(entries) => {
-                    self.mode = Mode::Actions {
-                        entries,
-                        selected: 0,
-                    }
-                }
-                Err(error) => self.message = error,
-            }
-        } else {
-            self.message = "Select an item first".into();
-        }
+        self.request_actions(false);
     }
 
     fn activate_item(&mut self) {
+        self.request_actions(true);
+    }
+
+    fn request_actions(&mut self, activate: bool) {
         if let (Some(plugin), Some(group), Some(item)) =
             (self.plugin_id(), self.group_id(), self.selected_item())
         {
-            match self
-                .app
-                .actions_at(plugin, group, self.location.as_deref(), &item)
-            {
-                Ok(entries) => {
-                    if let Some(action) = entries.iter().find(|action| action.is_default) {
-                        self.execute(action.invocation.clone());
-                    } else {
-                        self.mode = Mode::Actions {
-                            entries,
-                            selected: 0,
-                        };
-                    }
-                }
-                Err(error) => self.message = error,
-            }
+            self.submit_work(
+                plugin.to_owned(),
+                BackgroundRequest::Actions {
+                    group: group.to_owned(),
+                    location: self.location.clone(),
+                    item: item.clone(),
+                },
+                WorkKind::Actions { activate, item },
+            );
         } else {
             self.message = "Select an item first".into();
         }
@@ -1033,6 +1214,7 @@ impl Ui {
                 let next = move_index(self.group, self.groups.len(), forward, count);
                 if next != self.group {
                     self.remember_location();
+                    self.invalidate_work();
                     self.group = next;
                     self.filter.clear();
                     self.selected = 0;
@@ -1046,6 +1228,13 @@ impl Ui {
                 }
             }
             Focus::Items => {
+                if self
+                    .work
+                    .as_ref()
+                    .is_some_and(|work| !matches!(work.kind, WorkKind::Refresh { .. }))
+                {
+                    self.invalidate_work();
+                }
                 self.selected =
                     move_index(self.selected, self.visible_items().len(), forward, count)
             }
@@ -1054,6 +1243,15 @@ impl Ui {
 
     /// Returns false only for an explicit exit; errors remain visible in the session.
     pub fn handle(&mut self, key: Key) -> bool {
+        self.tick();
+        if matches!(key, Key::Escape | Key::Char(':' | ' ' | '?' | '/'))
+            && self
+                .work
+                .as_ref()
+                .is_some_and(|work| !matches!(work.kind, WorkKind::Refresh { .. }))
+        {
+            self.invalidate_work();
+        }
         if matches!(key, Key::Char('\x03' | '\x04')) {
             return false;
         }
@@ -1523,6 +1721,10 @@ impl Ui {
                 }
                 _ if !self.pending.is_empty() => self.pending_hint(),
                 _ if !self.message.is_empty() => format!("Error: {}", self.message),
+                _ if self.work.is_some() => format!(
+                    "Loading: {} (navigation remains available)",
+                    self.work.as_ref().unwrap().owner
+                ),
                 _ if !self.binding_errors.is_empty() => {
                     format!("Bindings: {} (? for details)", self.binding_errors[0])
                 }
@@ -1876,6 +2078,10 @@ impl Ui {
             }
             _ if !self.pending.is_empty() => self.pending_hint(),
             _ if !self.message.is_empty() => format!("Error: {}", self.message),
+            _ if self.work.is_some() => format!(
+                "Loading: {} (navigation remains available)",
+                self.work.as_ref().unwrap().owner
+            ),
             _ if !self.binding_errors.is_empty() => {
                 format!("Bindings: {} (? for details)", self.binding_errors[0])
             }

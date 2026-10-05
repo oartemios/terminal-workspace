@@ -1,6 +1,6 @@
-# Plugin API v0.5 — draft
+# Plugin API v0.6 — draft
 
-`PLUGIN_API_VERSION = "0.5"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
+`PLUGIN_API_VERSION = "0.6"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
 
 ## Данные и вызовы
 
@@ -28,7 +28,7 @@ Files нормализует пути внутри Workspace и задаёт def
 
 API 0.4 добавляет serde DTO и hooks `start`, `stop`, `runtime_status`, `installation_present`, `try_actions`. Start должен быть идемпотентным. Процессный adapter запускает worker после trust и permissions, проверяет handshake descriptor; SDK вызывает native start перед предметными операциями. Stop worker — завершение process group и освобождение pipe/child. Native cleanup hook не гарантирован при жёстком завершении. В linked usage Core вызывает stop, но не может принудительно остановить произвольные threads.
 
-Отказ обычной операции сохраняет соединение; transport fault завершает worker, показывает failed и требует явного restart/enable. Limits и deadline описаны в protocol. Runtime пока синхронный, не обеспечивает неблокирующую навигацию при медленной операции.
+Отказ обычной операции сохраняет соединение; transport fault завершает worker, показывает failed и требует явного restart/enable. Limits и deadline описаны в protocol. Production TUI использует polling-контракт API 0.6: startup/handshake, view, Actions и команды executable plugins выполняются вне input/render loop. Синхронные методы App остаются для коротких локальных вызовов и доверенного linked SDK usage.
 
 ## Permissions и trust
 
@@ -56,6 +56,22 @@ Host очищает environment; передаёт только manifest allowlis
 
 Defaults остаются изменяемыми: Files — локальный `p` для preview; Catalog — `p` для Read note только в Introduction. Открытие и parent используют общую грамматику `h/j/k/l`, Enter и Backspace. [Итерация 2.1](decisions/0005-keyboard-defaults.md) описывает раскладку; ранее удалённые aliases можно вернуть overrides.
 
-Изменения относительно 0.3: сериализуемые DTO, дополнительные permissions, lifecycle/status hooks, borrowed id/name, процессный SDK и фактическая установка пакета без пересборки host. Внешний контракт остаётся draft; events, фоновые задачи и refresh strategies появятся отдельно.
+Изменения относительно 0.3: сериализуемые DTO, дополнительные permissions, lifecycle/status hooks, borrowed id/name, процессный SDK и фактическая установка пакета без пересборки host. Внешний контракт остаётся draft; events и refresh strategies появятся отдельно.
 
 API 0.5 добавляет ContentFormat и Core-only ViewRequest. Rust Block literals должны явно задавать format. Новый host принимает manifests API 0.4 и 0.5; в старых JSON Blocks отсутствие format означает Text. Package/protocol остаются version 1. `core.view.find/goto/next/previous/source` управляют открытым output, не требуют Item и не вызывают plugin. `/`, `g`, `n/N`, `v`, `:120` и адресуемые команды сходятся к этому маршруту.
+
+## API 0.6: polling фоновой работы
+
+`runtime::BackgroundRequest` содержит `Start`, `View { group, location }`, `Actions { group, location, item }` или `Execute(CommandInvocation)`. `BackgroundResponse` содержит `Started`, `View(GroupView)`, `Actions { view, actions }` или `Executed(CommandOutcome)`. View при Actions повторно проверяет существование Item; host проверяет также уникальность IDs и ownership ссылок этого view.
+
+`Plugin::poll_background(workspace, permissions, request)` возвращает `std::task::Poll<Result<BackgroundResponse, String>>`. Capability необязательна: default выполняет обычные hooks синхронно для доверенных linked implementations. ProcessPlugin предоставляет неблокирующую реализацию для любого установленного executable package, включая independently packaged custom plugins; native plugin не должен реализовывать отдельный async API. Linked default не гарантирует responsiveness для медленного native кода.
+
+`App::poll_background(plugin_id, request)` применяет activation, permissions и те же проверки View/Actions/Outcome, что синхронный API. `App::poll_invoke(invocation)` — polling-маршрут CommandRegistry: зарегистрированная команда исполняется с тем же CommandId и аргументами из binding, command line, palette и Action. Core-команды непосредственные, кроме polling restart, включающего handshake. Синхронный `App::invoke` сохраняет прежний контракт.
+
+Host повторяет один request до `Ready`; `Pending` означает ongoing работу, а не пустой успешный результат. После `Ready` следующий вызов начинает новую операцию. На plugin допускается один pending request и один сохранённый completion. Повторный pending request coalesces; другой request ждёт занятого worker без растущей очереди, затем supersedes прежний результат. Не смешивать synchronous и polling calls, пока у plugin есть pending work: sync path возвращает диагностическую ошибку.
+
+Executable adapter сохраняет живой worker между операциями. Отдельный cancellation handle принадлежит каждой фоновой операции; stop завершает process group и удаляет pending/completed state. Suspend, disable, permission/trust revoke, Workspace switch, uninstall и Drop App используют этот lifecycle. Старый поток не может опубликовать completion в новую generation. TUI дополнительно проверяет Workspace root и собственный epoch перед применением результата; смена plugin/group или новый пользовательский контекст не заменяются поздним response.
+
+`Connection::Loading` отличает выполняемую фоновую операцию от Running/Disconnected/Failed. TUI показывает Loading в statusline, сохраняет клавиатурную навигацию и опрашивает completion через `Ui::tick`. Отмена UI-перехода скрывает его поздний результат; она не обещает rollback уже выполняющейся команды. Lifecycle cancellation завершает процесс, но также не откатывает совершённые им внешние действия.
+
+Wire operations, package format и protocol остаются version 1; host 0.6 принимает manifests API 0.4, 0.5 и 0.6. Кэш, refresh strategies и event subscriptions здесь не добавлены. [Решение фонового runtime](decisions/0010-background-plugin-runtime.md) описывает границы и проверку.

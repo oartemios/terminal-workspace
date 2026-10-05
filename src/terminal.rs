@@ -46,7 +46,7 @@ impl Terminal {
     }
 
     pub fn read_key(&self) -> io::Result<Option<Key>> {
-        let Some(byte) = read_byte(100)? else {
+        let Some(byte) = read_byte(16)? else {
             return Ok(None);
         };
         Ok(Some(match byte {

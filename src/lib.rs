@@ -14,7 +14,7 @@ pub use config::CONFIG_FILE;
 use serde_json::{json, Value};
 
 /// Draft source-level Plugin API; no dynamic ABI or isolation is implied.
-pub const PLUGIN_API_VERSION: &str = "0.5";
+pub const PLUGIN_API_VERSION: &str = "0.6";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyBinding {
@@ -132,6 +132,7 @@ impl Permission {
     }
 }
 
+#[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
     config: Value,
@@ -227,6 +228,20 @@ impl Workspace {
 }
 
 pub trait Plugin {
+    /// Optional host polling. Linked plugins default to synchronous trusted SDK usage.
+    fn poll_background(
+        &self,
+        workspace: &Workspace,
+        permissions: &BTreeSet<Permission>,
+        request: &runtime::BackgroundRequest,
+    ) -> std::task::Poll<Result<runtime::BackgroundResponse, String>> {
+        std::task::Poll::Ready(runtime::background_run(
+            self,
+            workspace,
+            permissions,
+            request,
+        ))
+    }
     fn id(&self) -> &str;
     fn name(&self) -> &str;
     fn start(
@@ -309,6 +324,7 @@ pub struct App {
     sessions: BTreeMap<PathBuf, (BTreeSet<String>, Value)>,
     previous_workspace: Option<PathBuf>,
     package_store: Option<runtime::PackageStore>,
+    restarting: std::cell::RefCell<BTreeSet<String>>,
     discovery_errors: Vec<String>,
 }
 
@@ -332,6 +348,7 @@ impl App {
             sessions: BTreeMap::new(),
             previous_workspace: None,
             package_store: None,
+            restarting: std::cell::RefCell::new(BTreeSet::new()),
             discovery_errors: Vec::new(),
         })
     }
@@ -497,6 +514,7 @@ impl App {
     }
 
     fn stop_plugin(&self, id: &str) {
+        self.restarting.borrow_mut().remove(id);
         if let Some(plugin) = self.installed.get(id) {
             let _ = catch_unwind(AssertUnwindSafe(|| plugin.stop()));
         }
@@ -720,6 +738,120 @@ impl App {
         Ok(plugin.as_ref())
     }
 
+    /// Resolve a registered invocation without starting a plugin or mutating state.
+    pub fn validate_invocation(
+        &self,
+        invocation: &CommandInvocation,
+    ) -> Result<Option<&str>, String> {
+        let (owner, command) = self
+            .registry
+            .get(&invocation.id)
+            .ok_or_else(|| format!("Unknown command: {}", invocation.id))?;
+        if command.requires_item && invocation.item.is_none() {
+            return Err(format!("Command {} requires an item", invocation.id));
+        }
+        if let Some(id) = owner {
+            self.active(id)?;
+            self.check_permissions(id)?;
+        }
+        Ok(owner.as_deref())
+    }
+
+    /// CommandRegistry execution with deferred delivery; Core commands remain immediate except restart.
+    pub fn poll_invoke(
+        &mut self,
+        invocation: CommandInvocation,
+    ) -> std::task::Poll<Result<CommandOutcome, String>> {
+        use runtime::{BackgroundRequest as Request, BackgroundResponse as Response};
+        use std::task::Poll;
+        let owner = match self.validate_invocation(&invocation) {
+            Ok(owner) => owner.map(str::to_owned),
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        if let Some(owner) = owner {
+            return self
+                .poll_background(&owner, &Request::Execute(invocation))
+                .map(|result| {
+                    result.and_then(|response| match response {
+                        Response::Executed(outcome) => Ok(outcome),
+                        _ => Err("Unexpected command response".into()),
+                    })
+                });
+        }
+        if invocation.id == "core.plugin.restart" && invocation.args.len() == 1 {
+            let id = &invocation.args[0];
+            if !self.restarting.borrow().contains(id) {
+                if let Err(error) = self.active(id).and_then(|_| self.check_permissions(id)) {
+                    return Poll::Ready(Err(error));
+                }
+                self.stop_plugin(id);
+                self.restarting.borrow_mut().insert(id.clone());
+            }
+            return self.poll_background(id, &Request::Start).map(|result| {
+                self.restarting.borrow_mut().remove(id);
+                result.map(|_| {
+                    CommandOutcome::Output(Block {
+                        format: ContentFormat::Text,
+                        source: "Core".into(),
+                        status: "ok".into(),
+                        content: format!("{id}: connected"),
+                    })
+                })
+            });
+        }
+        Poll::Ready(self.invoke(invocation))
+    }
+
+    /// Uses the same registration, activation, permissions and response validation as synchronous calls.
+    pub fn poll_background(
+        &self,
+        id: &str,
+        request: &runtime::BackgroundRequest,
+    ) -> std::task::Poll<Result<runtime::BackgroundResponse, String>> {
+        use runtime::{BackgroundRequest as Request, BackgroundResponse as Response};
+        use std::task::Poll;
+        let result = (|| {
+            let plugin = self.active(id)?;
+            self.check_permissions(id)?;
+            if let Request::Execute(invocation) = request {
+                if self.validate_invocation(invocation)? != Some(id) {
+                    return Err("Command belongs to another owner".into());
+                }
+            }
+            let permissions = self
+                .granted_permissions
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
+            let poll = catch_unwind(AssertUnwindSafe(|| {
+                plugin.poll_background(&self.workspace, &permissions, request)
+            }))
+            .map_err(|_| format!("Plugin {id} panicked during background work"))?;
+            match poll {
+                Poll::Pending => Ok(Poll::Pending),
+                Poll::Ready(result) => {
+                    let response = result?;
+                    match (&response, request) {
+                        (Response::Started, Request::Start) => {}
+                        (Response::View(view), Request::View { .. }) => {
+                            self.validate_view(id, view)?
+                        }
+                        (Response::Actions { view, actions }, Request::Actions { .. }) => {
+                            self.validate_view(id, view)?;
+                            self.validate_actions(id, actions)?;
+                        }
+                        (Response::Executed(outcome), Request::Execute(_)) => {
+                            Self::validate_outcome(outcome)?
+                        }
+                        _ => return Err("Background response does not match request".into()),
+                    }
+                    Ok(Poll::Ready(Ok(response)))
+                }
+            }
+        })();
+        result.unwrap_or_else(|error| Poll::Ready(Err(error)))
+    }
+
     pub fn groups(&self, id: &str) -> Result<Vec<Group>, String> {
         let plugin = self.active(id)?;
         catch_unwind(AssertUnwindSafe(|| plugin.groups()))
@@ -736,6 +868,11 @@ impl App {
             plugin.view(&self.workspace, group, location)
         }))
         .map_err(|_| format!("Plugin {id} failed while loading items"))??;
+        self.validate_view(id, &view)?;
+        Ok(view)
+    }
+
+    fn validate_view(&self, id: &str, view: &GroupView) -> Result<(), String> {
         let mut ids = BTreeSet::new();
         if view.items.iter().any(|item| !ids.insert(&item.id)) {
             return Err("Duplicate Item id in plugin view".into());
@@ -745,7 +882,7 @@ impl App {
                 return Err("Plugin view must use its own registered commands".into());
             }
         }
-        Ok(view)
+        Ok(())
     }
 
     pub fn actions(&self, id: &str, group: &str, item_id: &str) -> Result<Vec<Action>, String> {
@@ -768,17 +905,22 @@ impl App {
             .ok_or_else(|| format!("Item not found: {item_id}"))?;
         let actions = catch_unwind(AssertUnwindSafe(|| plugin.try_actions(&item)))
             .map_err(|_| format!("Plugin {id} failed while listing actions"))??;
+        self.validate_actions(id, &actions)?;
+        Ok(actions)
+    }
+
+    fn validate_actions(&self, id: &str, actions: &[Action]) -> Result<(), String> {
         if actions.iter().filter(|action| action.is_default).count() > 1 {
             return Err("Multiple default actions".into());
         }
-        for action in &actions {
+        for action in actions {
             if action.command_id != action.invocation.id
                 || self.command_owner(&action.command_id) != Some(id)
             {
                 return Err("Plugin action must invoke its own registered command".into());
             }
         }
-        Ok(actions)
+        Ok(())
     }
 
     pub fn item_icon(&self, id: &str, item: &Item) -> char {
@@ -925,14 +1067,7 @@ impl App {
             .into();
             invocation.args.push("WorkspaceRead".into());
         }
-        let (plugin_id, command) = self
-            .registry
-            .get(&invocation.id)
-            .ok_or_else(|| format!("Unknown command: {}", invocation.id))?;
-        if command.requires_item && invocation.item.is_none() {
-            return Err(format!("Command {} requires an item", invocation.id));
-        }
-        let Some(plugin_id) = plugin_id else {
+        let Some(plugin_id) = self.validate_invocation(&invocation)? else {
             return self.invoke_core(invocation);
         };
         let plugin = self.prepared(plugin_id)?;
@@ -945,6 +1080,11 @@ impl App {
                 invocation.id
             )
         })??;
+        Self::validate_outcome(&outcome)?;
+        Ok(outcome)
+    }
+
+    fn validate_outcome(outcome: &CommandOutcome) -> Result<(), String> {
         if matches!(
             outcome,
             CommandOutcome::WorkspaceChanged | CommandOutcome::View(_)
@@ -956,7 +1096,7 @@ impl App {
             }
             .into());
         }
-        Ok(outcome)
+        Ok(())
     }
 
     fn invoke_core(&mut self, invocation: CommandInvocation) -> Result<CommandOutcome, String> {

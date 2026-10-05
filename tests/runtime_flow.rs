@@ -523,11 +523,411 @@ fn files_preview_reads_beyond_eight_kib_and_reports_oversized_files_without_part
 #[test]
 fn old_api_packages_and_text_blocks_remain_compatible() {
     let mut manifest = Manifest::for_plugin(&FilesPlugin, vec!["--serve-files".into()]);
-    manifest.api_version = "0.4".into();
-    manifest.compatible().unwrap();
+    for version in ["0.4", "0.5", "0.6"] {
+        manifest.api_version = version.into();
+        manifest.compatible().unwrap();
+    }
     let block: terminal_workspace::Block = serde_json::from_value(
         serde_json::json!({"source":"Old plugin","status":"ok","content":"# literal text"}),
     )
     .unwrap();
     assert_eq!(block.format, terminal_workspace::ContentFormat::Text);
+}
+
+fn gated_probe(fixture: &Fixture, gate: &str) -> App {
+    let source = fixture.probe(vec![Permission::Process]);
+    let mut manifest = Manifest::read(&source).unwrap();
+    manifest.args = vec![format!("gate_{gate}")];
+    std::fs::write(
+        source.join("plugin.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let mut app = fixture.app();
+    app.install_package(source).unwrap();
+    app.trust_plugin("probe").unwrap();
+    app.enable("probe").unwrap();
+    app.grant("probe", Permission::Process).unwrap();
+    app
+}
+fn wait_marker(fixture: &Fixture, operation: &str) -> u32 {
+    let path = fixture
+        .store
+        .directory("probe")
+        .unwrap()
+        .join(format!("{operation}.started"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(value) = std::fs::read_to_string(&path) {
+            if let Ok(pid) = value.parse() {
+                return pid;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "missing {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+fn release(fixture: &Fixture, operation: &str) {
+    std::fs::write(
+        fixture
+            .store
+            .directory("probe")
+            .unwrap()
+            .join(format!("{operation}.release")),
+        "go",
+    )
+    .unwrap();
+}
+fn wait_background(
+    app: &App,
+    request: &terminal_workspace::runtime::BackgroundRequest,
+) -> Result<terminal_workspace::runtime::BackgroundResponse, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+    loop {
+        if let std::task::Poll::Ready(result) = app.poll_background("probe", request) {
+            return result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task did not complete"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+fn wait_stopped(pid: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !not_running(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker {pid} remained alive"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn background_startup_view_actions_and_commands_leave_local_work_responsive() {
+    use terminal_workspace::runtime::{
+        BackgroundRequest as Request, BackgroundResponse as Response,
+    };
+    for gate in ["describe", "view", "actions", "execute"] {
+        let fixture = Fixture::new();
+        let mut app = gated_probe(&fixture, gate);
+        let request = match gate {
+            "actions" => Request::Actions {
+                group: "entries".into(),
+                location: None,
+                item: "probe.item".into(),
+            },
+            "execute" => Request::Execute(CommandInvocation {
+                id: "probe.info".into(),
+                item: None,
+                args: vec![],
+            }),
+            _ => Request::View {
+                group: "entries".into(),
+                location: None,
+            },
+        };
+        assert!(app.poll_background("probe", &request).is_pending());
+        let pid = wait_marker(&fixture, gate);
+        let start = std::time::Instant::now();
+        assert_eq!(files(&mut app), "first file");
+        assert!(app.poll_background("probe", &request).is_pending());
+        assert_eq!(
+            app.plugins()
+                .into_iter()
+                .find(|p| p.id == "probe")
+                .unwrap()
+                .runtime
+                .connection,
+            Connection::Loading
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "local work blocked by gated plugin"
+        );
+        release(&fixture, gate);
+        let result = wait_background(&app, &request);
+        if gate == "actions" {
+            assert!(result.unwrap_err().contains("own registered command"));
+        } else if gate == "execute" {
+            let Response::Executed(CommandOutcome::Output(block)) = result.unwrap() else {
+                panic!("expected output");
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&block.content).unwrap()["pid"],
+                pid
+            );
+        } else {
+            assert!(matches!(result.unwrap(), Response::View(_)));
+        }
+        // The same live worker can serve the next operation, not one process per request.
+        let next = Request::Execute(CommandInvocation {
+            id: "probe.info".into(),
+            item: None,
+            args: vec![],
+        });
+        let Response::Executed(CommandOutcome::Output(block)) =
+            wait_background(&app, &next).unwrap()
+        else {
+            panic!("expected output");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&block.content).unwrap()["pid"],
+            pid
+        );
+    }
+}
+
+#[test]
+fn cancelling_gated_startup_and_view_covers_all_lifecycle_boundaries() {
+    use terminal_workspace::runtime::BackgroundRequest;
+    for gate in ["describe", "view"] {
+        for boundary in [
+            "suspend",
+            "disable",
+            "revoke",
+            "untrust",
+            "switch",
+            "uninstall",
+            "shutdown",
+        ] {
+            let fixture = Fixture::new();
+            let mut app = gated_probe(&fixture, gate);
+            let request = BackgroundRequest::View {
+                group: "entries".into(),
+                location: None,
+            };
+            assert!(app.poll_background("probe", &request).is_pending());
+            let pid = wait_marker(&fixture, gate);
+            let start = std::time::Instant::now();
+            match boundary {
+                "suspend" => app.disable_for_session("probe").unwrap(),
+                "disable" => app.disable("probe").unwrap(),
+                "revoke" => app.revoke("probe", Permission::Process).unwrap(),
+                "untrust" => {
+                    invoke(&mut app, "core.plugin.untrust", vec!["probe".into()]).unwrap();
+                }
+                "switch" => app.switch_workspace(fixture.second.clone()).unwrap(),
+                "uninstall" => app.uninstall("probe").unwrap(),
+                "shutdown" => {
+                    drop(app);
+                    wait_stopped(pid);
+                    continue;
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_millis(500),
+                "{boundary} waited for {gate}"
+            );
+            wait_stopped(pid);
+            assert_eq!(
+                files(&mut app),
+                if boundary == "switch" {
+                    "second file"
+                } else {
+                    "first file"
+                }
+            );
+            if boundary == "switch" {
+                app.enable("probe").unwrap();
+                app.grant("probe", Permission::Process).unwrap();
+                release(&fixture, gate);
+                let next = BackgroundRequest::Execute(CommandInvocation {
+                    id: "probe.info".into(),
+                    item: None,
+                    args: vec![],
+                });
+                let terminal_workspace::runtime::BackgroundResponse::Executed(
+                    CommandOutcome::Output(block),
+                ) = wait_background(&app, &next).unwrap()
+                else {
+                    panic!("expected output");
+                };
+                let info: Value = serde_json::from_str(&block.content).unwrap();
+                assert_ne!(info["pid"], pid);
+                assert_eq!(info["root"], fixture.second.to_string_lossy().as_ref());
+            }
+        }
+    }
+}
+
+#[test]
+fn background_timeout_and_crash_are_local_and_restart_is_nonblocking() {
+    use terminal_workspace::runtime::{
+        BackgroundRequest as Request, BackgroundResponse as Response,
+    };
+    let fixture = Fixture::new();
+    let mut app = gated_probe(&fixture, "unused");
+    for command in ["hang", "crash", "malformed"] {
+        let request = Request::Execute(CommandInvocation {
+            id: format!("probe.{command}"),
+            item: None,
+            args: vec![],
+        });
+        assert!(app.poll_background("probe", &request).is_pending());
+        assert!(wait_background(&app, &request).is_err());
+        assert_eq!(files(&mut app), "first file");
+        assert_eq!(
+            app.plugins()
+                .into_iter()
+                .find(|p| p.id == "probe")
+                .unwrap()
+                .runtime
+                .connection,
+            Connection::Failed
+        );
+        let restart = CommandInvocation {
+            id: "core.plugin.restart".into(),
+            item: None,
+            args: vec!["probe".into()],
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+        loop {
+            if let std::task::Poll::Ready(result) = app.poll_invoke(restart.clone()) {
+                result.unwrap();
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let next = Request::Execute(CommandInvocation {
+            id: "probe.info".into(),
+            item: None,
+            args: vec![],
+        });
+        assert!(matches!(
+            wait_background(&app, &next).unwrap(),
+            Response::Executed(_)
+        ));
+    }
+}
+
+#[test]
+fn ui_can_leave_a_gated_view_without_applying_its_late_result() {
+    use console::{strip_ansi_codes, Key};
+    use terminal_workspace::ui::Ui;
+    let fixture = Fixture::new();
+    let mut ui = Ui::new(gated_probe(&fixture, "view"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+    while ui.has_pending_work() {
+        ui.tick();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    ui.handle(Key::Tab);
+    ui.handle(Key::ArrowRight);
+    wait_marker(&fixture, "view");
+    let start = std::time::Instant::now();
+    assert!(ui.handle(Key::ArrowLeft));
+    assert!(start.elapsed() < std::time::Duration::from_millis(200));
+    release(&fixture, "view");
+    while ui.has_pending_work() {
+        ui.tick();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let frame = strip_ansi_codes(&ui.render(140, 32)).into_owned();
+    assert!(frame.contains("[files]"));
+    assert!(frame.contains("note.txt"));
+    assert!(!frame.contains("Probe item"));
+}
+
+#[test]
+fn background_handshake_and_initial_view_timeouts_report_failure_without_blocking_files() {
+    use terminal_workspace::runtime::BackgroundRequest;
+    for gate in ["describe", "view"] {
+        let fixture = Fixture::new();
+        let mut app = gated_probe(&fixture, gate);
+        let request = BackgroundRequest::View {
+            group: "entries".into(),
+            location: None,
+        };
+        assert!(app.poll_background("probe", &request).is_pending());
+        let pid = wait_marker(&fixture, gate);
+        let error = wait_background(&app, &request).unwrap_err();
+        assert!(error.contains("timed out"));
+        wait_stopped(pid);
+        assert_eq!(files(&mut app), "first file");
+        assert_eq!(
+            app.plugins()
+                .into_iter()
+                .find(|p| p.id == "probe")
+                .unwrap()
+                .runtime
+                .connection,
+            Connection::Failed
+        );
+    }
+}
+
+#[test]
+fn background_cancellation_terminates_children_of_a_reused_worker() {
+    use terminal_workspace::runtime::{
+        BackgroundRequest as Request, BackgroundResponse as Response,
+    };
+    let fixture = Fixture::new();
+    let mut app = gated_probe(&fixture, "unused");
+    let request = Request::Execute(CommandInvocation {
+        id: "probe.child".into(),
+        item: None,
+        args: vec![],
+    });
+    let Response::Executed(CommandOutcome::Output(block)) =
+        wait_background(&app, &request).unwrap()
+    else {
+        panic!("expected output");
+    };
+    let info: Value = serde_json::from_str(&block.content).unwrap();
+    let request = Request::Execute(CommandInvocation {
+        id: "probe.hang".into(),
+        item: None,
+        args: vec![],
+    });
+    assert!(app.poll_background("probe", &request).is_pending());
+    app.disable_for_session("probe").unwrap();
+    wait_stopped(info["pid"].as_u64().unwrap() as u32);
+    wait_stopped(info["child"].as_u64().unwrap() as u32);
+}
+
+#[test]
+fn ui_rejects_a_late_command_after_workspace_switch_and_keeps_initial_load_on_input_error() {
+    use console::{strip_ansi_codes, Key};
+    use terminal_workspace::ui::Ui;
+    let fixture = Fixture::new();
+    let mut ui = Ui::new(gated_probe(&fixture, "execute"));
+    // A command pressed before its required Item is available must not discard initial view work.
+    ui.handle(Key::Char('p'));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+    while ui.has_pending_work() {
+        ui.tick();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(strip_ansi_codes(&ui.render(140, 32)).contains("note.txt"));
+    for c in ":probe.info".chars() {
+        ui.handle(Key::Char(c));
+    }
+    ui.handle(Key::Enter);
+    let pid = wait_marker(&fixture, "execute");
+    for c in format!(":core.workspace.open {}", fixture.second.display()).chars() {
+        ui.handle(Key::Char(c));
+    }
+    ui.handle(Key::Enter);
+    wait_stopped(pid);
+    while ui.has_pending_work() {
+        ui.tick();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let frame = strip_ansi_codes(&ui.render(140, 32)).into_owned();
+    assert!(frame.contains(&fixture.second.display().to_string()));
+    assert!(frame.contains("note.txt"));
+    assert!(!frame.contains("\"pid\""));
 }

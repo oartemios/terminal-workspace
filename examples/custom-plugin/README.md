@@ -1,6 +1,6 @@
 # Catalog — пример custom plugin
 
-Независимый Rust package вне first-party дерева. Секции и заметки сохраняют нативную семантику; opaque locations, default Action, Navigation и parent используют основной Plugin API 0.5. Core не интерпретирует секции как каталоги.
+Независимый Rust package вне first-party дерева. Секции и заметки сохраняют нативную семантику; opaque locations, default Action, Navigation и parent используют основной Plugin API 0.6. Core не интерпретирует секции как каталоги.
 
 ## Сборка и установка
 
@@ -33,4 +33,4 @@ Enter/`l` открывают секцию, `h`/Backspace возвращают к
 cargo test --offline --manifest-path examples/custom-plugin/Cargo.toml --target-dir target/custom-plugin
 ```
 
-Четыре теста проверяют API, TUI, settings/activation после restart и фактическую упаковку executable, установку, trust, четыре командных маршрута, два Workspace, suspend/enable и uninstall. [Контракт protocol](../../docs/plugin-protocol.md) и [решение runtime](../../docs/decisions/0006-executable-plugin-runtime.md) описывают пределы исполнения и доступа.
+Четыре теста проверяют API 0.6 и polling completion executable package через `Ui::tick`, TUI, settings/activation после restart и фактическую упаковку executable, установку, trust, четыре командных маршрута, два Workspace, suspend/enable и uninstall. [Контракт protocol](../../docs/plugin-protocol.md) и [решение runtime](../../docs/decisions/0006-executable-plugin-runtime.md) описывают пределы исполнения и доступа.

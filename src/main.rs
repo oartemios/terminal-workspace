@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_size = (0, 0);
     let mut dirty = true;
     loop {
+        dirty |= ui.tick();
         let size = terminal.size();
         if dirty || size != last_size {
             ui.resize_to(size.0, size.1);

@@ -1,8 +1,11 @@
 //! Local executable packages and JSON-lines protocol. Process containment is not an OS sandbox.
+mod background;
 mod package;
 mod process;
 mod server;
 
+pub(crate) use background::run as background_run;
+pub use background::{BackgroundRequest, BackgroundResponse};
 pub use package::{write_package, Manifest, PackageStore};
 pub use process::ProcessPlugin;
 pub use server::serve_plugin;
@@ -102,6 +105,7 @@ pub enum Connection {
     InProcess,
     Disconnected,
     Running,
+    Loading,
     Failed,
 }
 
