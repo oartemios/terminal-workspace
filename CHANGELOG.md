@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-05
+
 - Startup/handshake, view, contextual Actions, команды и restart executable plugins в TUI выполняются в фоне; навигация остаётся доступной.
 - Отмена при lifecycle/Workspace changes завершает worker process group и не допускает поздних результатов в новый контекст.
 - Draft Plugin API 0.6 добавляет polling-контракт; package/protocol 1 и manifests API 0.4/0.5 остаются совместимыми.
+- ROADMAP синхронизирован с issues: приоритеты, зависимости и performance-ограничения выпуска.
+
+Ограничения 0.2.0: прототип до MVP; GitHub, кэш и refresh strategies ещё не реализованы. Request/handshake deadlines остаются 1 s/5 s; linked SDK default синхронен. OS sandbox отсутствует. Производительность по целям MVP не подтверждена.
 
 ## 0.1.0 — 2026-10-04
 
