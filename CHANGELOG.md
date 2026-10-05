@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- GitHub Release автоматически публикуется после успешных теговых сборок всех четырёх платформ: проверка архивов, заметки из CHANGELOG и восстановление незавершённого draft.
+
 ## 0.2.0 — 2026-10-05
 
 - Startup/handshake, view, contextual Actions, команды и restart executable plugins в TUI выполняются в фоне; навигация остаётся доступной.
