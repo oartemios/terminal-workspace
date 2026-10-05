@@ -4,7 +4,7 @@ use tw_example_catalog::CatalogPlugin;
 
 #[test]
 fn same_custom_plugin_uses_two_workspace_contexts() {
-    assert_eq!(PLUGIN_API_VERSION, "0.5");
+    assert_eq!(PLUGIN_API_VERSION, "0.6");
     for root in [std::env::current_dir().unwrap(), std::env::temp_dir()] {
         let mut app = App::new(root).unwrap();
         app.install(Box::new(CatalogPlugin), true).unwrap();
@@ -198,9 +198,19 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
     assert!(app.load_packages(store.clone(), &[]).is_empty());
     let mut ui = Ui::new(app);
     ui.resize_to(180, 32);
+    fn handle(ui: &mut Ui, key: Key) -> bool {
+        let result = ui.handle(key);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ui.has_pending_work() {
+            assert!(std::time::Instant::now() < deadline, "{}", frame(ui));
+            ui.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        result
+    }
     fn text(ui: &mut Ui, value: &str) {
         for c in value.chars() {
-            assert!(ui.handle(Key::Char(c)));
+            assert!(handle(ui, Key::Char(c)));
         }
     }
     fn frame(ui: &Ui) -> String {
@@ -208,20 +218,20 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
     }
     fn command(ui: &mut Ui, value: &str) {
         text(ui, &format!(":{value}"));
-        ui.handle(Key::Enter);
+        handle(ui, Key::Enter);
     }
     text(&mut ui, " core.plugin.install");
-    ui.handle(Key::Enter);
+    handle(&mut ui, Key::Enter);
     assert!(frame(&ui).contains(":core.plugin.install "));
     text(&mut ui, &source.to_string_lossy());
-    ui.handle(Key::Enter);
+    handle(&mut ui, Key::Enter);
     assert!(frame(&ui).contains("catalog: installed"));
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     command(&mut ui, "core.plugin.enable catalog");
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     assert!(frame(&ui).contains("untrusted"));
     command(&mut ui, "core.plugin.trust catalog");
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     assert!(frame(&ui).contains("Introduction section"));
     text(&mut ui, "l");
     for route in 0..4 {
@@ -230,11 +240,11 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
             1 => command(&mut ui, "catalog.read"),
             2 => {
                 text(&mut ui, " catalog.read");
-                ui.handle(Key::Enter);
+                handle(&mut ui, Key::Enter);
             }
             _ => {
                 text(&mut ui, "a");
-                ui.handle(Key::Enter);
+                handle(&mut ui, Key::Enter);
             }
         }
         assert!(
@@ -247,11 +257,11 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
         assert!(frame(&ui).contains("# First runtime greeting"));
         text(&mut ui, "v");
         text(&mut ui, "/First runtime greeting");
-        ui.handle(Key::Enter);
+        handle(&mut ui, Key::Enter);
         assert!(frame(&ui).contains("match 1/1"));
         command(&mut ui, "1");
         assert!(frame(&ui).contains("First runtime greeting"));
-        ui.handle(Key::Escape);
+        handle(&mut ui, Key::Escape);
     }
     command(
         &mut ui,
@@ -260,21 +270,21 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
     text(&mut ui, "lp");
     assert!(frame(&ui).contains("Second runtime greeting"));
     assert!(!frame(&ui).contains("# Second runtime greeting"));
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     text(&mut ui, ",b");
     text(&mut ui, "p");
     assert!(frame(&ui).contains("First runtime greeting"));
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     text(&mut ui, ",s");
     assert!(frame(&ui).contains("session disabled"));
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     text(&mut ui, ",e");
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     assert!(frame(&ui).contains("Introduction section"));
     let saved = std::fs::read(first.join(terminal_workspace::CONFIG_FILE)).unwrap();
     command(&mut ui, "core.plugin.uninstall catalog");
     assert!(frame(&ui).contains("catalog: uninstalled"));
-    ui.handle(Key::Escape);
+    handle(&mut ui, Key::Escape);
     assert_eq!(
         std::fs::read(first.join(terminal_workspace::CONFIG_FILE)).unwrap(),
         saved

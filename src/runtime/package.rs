@@ -69,7 +69,10 @@ impl Manifest {
     pub fn compatible(&self) -> Result<(), String> {
         if self.package_version != 1
             || self.protocol_version != PROTOCOL_VERSION
-            || !matches!(self.api_version.as_str(), "0.4" | PLUGIN_API_VERSION)
+            || !matches!(
+                self.api_version.as_str(),
+                "0.4" | "0.5" | PLUGIN_API_VERSION
+            )
         {
             return Err(format!(
                 "Incompatible plugin: package {}, protocol {}, API {}; expected 1 / {} / {}",

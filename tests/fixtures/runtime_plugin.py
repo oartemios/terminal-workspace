@@ -11,6 +11,10 @@ descriptor = json.loads(Path("plugin.json").read_text())["plugin"]
 for line in sys.stdin:
     request = json.loads(line)
     op = request["op"]
+    if f"gate_{op}" in sys.argv:
+        Path(f"{op}.started").write_text(str(os.getpid()))
+        while not Path(f"{op}.release").exists():
+            time.sleep(0.005)
     result = None
     error = None
     if op == "describe":

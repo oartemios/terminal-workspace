@@ -106,9 +106,19 @@ fn output(app: &mut App, command: &str, item: &str) -> Result<String, String> {
         _ => panic!("Expected Git Block"),
     }
 }
+fn handle(ui: &mut Ui, key: Key) -> bool {
+    let result = ui.handle(key);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while ui.has_pending_work() {
+        assert!(std::time::Instant::now() < deadline, "{}", frame(ui));
+        ui.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    result
+}
 fn text(ui: &mut Ui, input: &str) {
     for c in input.chars() {
-        assert!(ui.handle(Key::Char(c)));
+        assert!(handle(ui, Key::Char(c)));
     }
 }
 fn frame(ui: &Ui) -> String {
@@ -117,10 +127,10 @@ fn frame(ui: &Ui) -> String {
 fn git_ui(app: App) -> Ui {
     let mut ui = Ui::new(app);
     ui.resize_to(140, 32);
-    ui.handle(Key::Tab);
-    ui.handle(Key::ArrowRight);
-    ui.handle(Key::Enter);
-    ui.handle(Key::Enter);
+    handle(&mut ui, Key::Tab);
+    handle(&mut ui, Key::ArrowRight);
+    handle(&mut ui, Key::Enter);
+    handle(&mut ui, Key::Enter);
     assert!(frame(&ui).contains("[git]"));
     ui
 }
@@ -182,21 +192,21 @@ fn all_entry_points_use_git_commands_and_group_scoped_bindings() {
     for route in 0..4 {
         let mut ui = git_ui(f.app(&f.first));
         text(&mut ui, "/note with spaces");
-        ui.handle(Key::Enter);
+        handle(&mut ui, Key::Enter);
         match route {
             0 => {
-                ui.handle(Key::Char('a'));
+                handle(&mut ui, Key::Char('a'));
                 assert!(frame(&ui).contains("View file diff"));
-                ui.handle(Key::Enter);
+                handle(&mut ui, Key::Enter);
             }
             1 => text(&mut ui, "p"),
             2 => {
                 text(&mut ui, ":git.diff note with spaces.md");
-                ui.handle(Key::Enter);
+                handle(&mut ui, Key::Enter);
             }
             _ => {
                 text(&mut ui, " git.diff");
-                ui.handle(Key::Enter);
+                handle(&mut ui, Key::Enter);
             }
         }
         assert!(
@@ -204,15 +214,15 @@ fn all_entry_points_use_git_commands_and_group_scoped_bindings() {
             "route {route}: {}",
             frame(&ui)
         );
-        ui.handle(Key::Escape);
+        handle(&mut ui, Key::Escape);
         assert!(frame(&ui).contains("note with spaces.md"));
-        ui.handle(Key::BackTab);
-        ui.handle(Key::ArrowRight);
-        ui.handle(Key::Enter);
+        handle(&mut ui, Key::BackTab);
+        handle(&mut ui, Key::ArrowRight);
+        handle(&mut ui, Key::Enter);
         assert!(frame(&ui).contains("[Branches]"));
         text(&mut ui, "p");
         assert!(frame(&ui).contains("Branch: main"));
-        ui.handle(Key::Escape);
+        handle(&mut ui, Key::Escape);
         assert!(frame(&ui).contains("* main"));
     }
 }

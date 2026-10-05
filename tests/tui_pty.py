@@ -211,7 +211,7 @@ with tempfile.TemporaryDirectory(prefix="tw-pty-") as workspace:
             session.send(b":core.plugins\r", b"Availability: Untrusted")
             session.send(b"\x1b", b"> Items")
             session.send(b":core.plugin.trust files\r", b"trusted for local")
-            session.send(b"\x1b", b"> Items")
+            session.send(b"\x1b", "заметка.md".encode())
             session.send("/заметка\rp".encode(), b"preview through the real terminal")
             session.send(b"\x1b", b"> Items")
             session.send(b",s", b"session disabled")
@@ -322,22 +322,22 @@ with tempfile.TemporaryDirectory(prefix="tw-git-pty-") as base:
         for permission in [b"WorkspaceRead", b"Process"]:
             session.send(b":core.permission.grant git " + permission + b"\r", permission + b" granted")
             session.send(b"\x1b", b"> Items")
-        session.send(b"\t\x1b[C\r\r", b"[Status]")
+        session.send(b"\t\x1b[C\r\r", b"note with spaces.txt")
         session.send(b"/note with spaces\r", b"filter: note with spaces")
         session.send(b"a", b"View file diff")
         session.send(b"\r", b"+after project 0")
         session.send(b"\x1b", b"> Items")
         session.send(b"p", b"+after project 0")
         session.send(b"\x1b", b"> Items")
-        session.send(b"\x1b[Z\x1b[C\r", b"[Branches]")
+        session.send(b"\x1b[Z\x1b[C\r", b"* main")
         session.send(b"p", b"Branch: main")
         session.send(b"\x1b", b"> Items")
         session.send(b",w", b":core.workspace.open ")
         session.send(str(roots[1]).encode() + b"\r", b"note with spaces.txt")
-        session.send(b"\t\x1b[C\r\r", b"[Status]")
+        session.send(b"\t\x1b[C\r\r", b"note with spaces.txt")
         session.send(b":git.diff note with spaces.txt\r", b"+after project 1")
         session.send(b"\x1b", b"> Items")
-        session.send(b",b", b"[Branches]")
+        session.send(b",b", b"* main")
         session.send(b"p", b"Branch: main")
         session.send(b"\x1b", b"> Items")
         session.send(b":core.plugin.suspend git\r", b"session disabled")
@@ -346,5 +346,64 @@ with tempfile.TemporaryDirectory(prefix="tw-git-pty-") as base:
         session.send(b":files.preview note with spaces.txt\r", b"after project 0")
         session.exit(b"q")
         print("Git package CLI, explicit activation/permissions, Status/diff, Actions, scoped binding, Branches, two Workspaces and Files after suspend: passed")
+    finally:
+        session.close()
+
+
+# Protocol gates make the actual terminal test independent of network speed.
+with tempfile.TemporaryDirectory(prefix="tw-background-pty-") as base:
+    root = Path(base, "project")
+    root.mkdir()
+    (root / "note.txt").write_text("local preview while worker is blocked\n")
+    source = Path(base, "Probe package")
+    source.mkdir()
+    source.joinpath("plugin").write_bytes(Path(__file__).parent.joinpath("fixtures/runtime_plugin.py").read_bytes())
+    source.joinpath("plugin.json").write_text(json.dumps({
+        "package_version": 1, "protocol_version": 1, "api_version": "0.6",
+        "executable": "plugin", "args": ["gate_describe", "gate_view"],
+        "environment": [], "credentials": [],
+        "plugin": {"id": "probe", "name": "Probe", "groups": [{"id": "entries", "title": "Entries"}],
+                   "commands": [{"id": "probe.info", "title": "Probe info", "requires_item": False}],
+                   "permissions": [], "keybindings": []},
+    }))
+    installed = Path(PLUGIN_STORE.name, "probe")
+    def marker(operation):
+        deadline = time.monotonic() + 5
+        path = installed / f"{operation}.started"
+        while time.monotonic() < deadline:
+            if path.exists() and path.read_text().strip():
+                return int(path.read_text())
+            time.sleep(0.005)
+        raise AssertionError(f"Missing gate {operation}")
+    session = Session(str(root))
+    try:
+        session.send(b"r", b"note.txt")
+        for command, expected in [
+            (f"core.plugin.install {source}", b"probe: installed"),
+            ("core.plugin.trust probe", b"trusted for local"),
+            ("core.plugin.enable probe", b"enabled for Workspace and session"),
+        ]:
+            session.send(b":" + command.encode() + b"\r", expected)
+            session.send(b"\x1b", b"note.txt")
+        session.send(b":probe.info\r", b"Loading: probe")
+        marker("describe")
+        session.send(b"?", b"Tab / Shift-Tab")
+        assert session.last_event_ms < 500, session.last_event_ms
+        session.send(b"\x1b", b"note.txt")
+        session.send(b":files.preview note.txt\r", b"local preview while worker is blocked")
+        assert session.last_event_ms < 500, session.last_event_ms
+        (installed / "describe.release").write_text("go")
+        session.send(b"\x1b", b"> Items")
+        session.send(b"\t\x1b[C\x1b[C\r\r", b"Loading: probe")
+        marker("view")
+        session.send(b"\t\x1b[D\x1b[D\r\r", b"note.txt")
+        assert session.last_event_ms < 500, session.last_event_ms
+        (installed / "view.release").write_text("go")
+        session.send(b"?", b"Tab / Shift-Tab")
+        session.send(b"\x1b", b"note.txt")
+        assert b"Probe item" not in session.read(0.05)
+        session.send(b":core.plugin.suspend probe\r", b"session disabled")
+        session.exit(b"q")
+        print("Background startup/view gates, keyboard help/navigation, local Files preview, stale-result suppression and terminal restoration: passed")
     finally:
         session.close()

@@ -3,6 +3,7 @@ use super::{
     Availability, Connection, Context, Manifest, Operation, PackageStore, Reply, Request,
     RuntimeStatus, ViewReply, MAX_MESSAGE, PROTOCOL_VERSION, REQUEST_TIMEOUT_MS,
 };
+use super::{BackgroundRequest, BackgroundResponse};
 use crate::{
     Action, Command, CommandInvocation, CommandOutcome, Group, GroupView, Item, KeyBinding,
     Permission, Plugin, Workspace,
@@ -14,7 +15,45 @@ use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, ChildStdout, Command as Process, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct Cancellation {
+    cancelled: bool,
+    pid: Option<u32>,
+}
+impl Cancellation {
+    fn cancel(control: &Arc<Mutex<Self>>) {
+        let mut state = control.lock().unwrap_or_else(|e| e.into_inner());
+        state.cancelled = true;
+        if let Some(pid) = state.pid {
+            // SAFETY: pid remains registered until the owning Worker is reaped under this lock.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+type Completion = (
+    (Context, BackgroundRequest),
+    Result<BackgroundResponse, String>,
+);
+
+struct Job {
+    key: (Context, BackgroundRequest),
+    control: Arc<Mutex<Cancellation>>,
+    receiver: mpsc::Receiver<(State, Result<BackgroundResponse, String>)>,
+    armed: bool,
+}
+impl Drop for Job {
+    fn drop(&mut self) {
+        if self.armed {
+            Cancellation::cancel(&self.control);
+        }
+    }
+}
 
 struct Worker {
     child: Child,
@@ -22,12 +61,14 @@ struct Worker {
     output: ChildStdout,
     bytes: Vec<u8>,
     next_id: u64,
+    control: Option<Arc<Mutex<Cancellation>>>,
 }
 impl Worker {
     fn spawn(
         store: &PackageStore,
         manifest: &Manifest,
         permissions: &BTreeSet<Permission>,
+        control: Option<Arc<Mutex<Cancellation>>>,
     ) -> Result<Self, String> {
         let directory = store.directory(&manifest.plugin.id)?;
         let executable = directory.join(&manifest.executable);
@@ -62,9 +103,27 @@ impl Worker {
                 }
             });
         }
+        if control
+            .as_ref()
+            .is_some_and(|c| c.lock().unwrap_or_else(|e| e.into_inner()).cancelled)
+        {
+            return Err("Background work cancelled".into());
+        }
+        // Do not hold the cancellation lock across OS process startup.
         let mut child = command
             .spawn()
             .map_err(|e| format!("Cannot start plugin: {e}"))?;
+        if let Some(control) = &control {
+            let mut state = control.lock().unwrap_or_else(|e| e.into_inner());
+            state.pid = Some(child.id());
+            if state.cancelled {
+                // Cancellation may have arrived while spawn was in progress.
+                // SAFETY: the fresh child created its own process group before exec.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+            }
+        }
         let input = child.stdin.take().ok_or("Missing plugin stdin")?;
         let output = child.stdout.take().ok_or("Missing plugin stdout")?;
         let worker = Self {
@@ -73,6 +132,7 @@ impl Worker {
             output,
             bytes: Vec::new(),
             next_id: 0,
+            control,
         };
         nonblocking(worker.input.as_raw_fd())?;
         nonblocking(worker.output.as_raw_fd())?;
@@ -150,12 +210,19 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
+        let mut cancellation = self
+            .control
+            .as_ref()
+            .map(|c| c.lock().unwrap_or_else(|e| e.into_inner()));
         // SAFETY: this worker creates its own process group with its child pid.
         unsafe {
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(state) = &mut cancellation {
+            state.pid = None;
+        }
     }
 }
 fn nonblocking(fd: RawFd) -> Result<(), String> {
@@ -211,6 +278,9 @@ pub struct ProcessPlugin {
     store: PackageStore,
     manifest: Manifest,
     state: RefCell<State>,
+    job: RefCell<Option<Job>>,
+    completed: RefCell<Option<Completion>>,
+    control: Option<Arc<Mutex<Cancellation>>>,
 }
 impl ProcessPlugin {
     pub(crate) fn new(store: PackageStore, manifest: Manifest) -> Self {
@@ -218,9 +288,39 @@ impl ProcessPlugin {
             store,
             manifest,
             state: RefCell::new(State::default()),
+            job: RefCell::new(None),
+            completed: RefCell::new(None),
+            control: None,
+        }
+    }
+    fn collect_job(&self) {
+        let mut job = self.job.borrow_mut();
+        let Some(running) = job.as_ref() else {
+            return;
+        };
+        match running.receiver.try_recv() {
+            Ok((state, result)) => {
+                let key = running.key.clone();
+                *self.state.borrow_mut() = state;
+                *self.completed.borrow_mut() = Some((key, result));
+                // Success keeps the worker alive; dropping the job must not kill it.
+                if let Some(mut job) = job.take() {
+                    job.armed = false;
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let error = "Background worker disconnected".to_owned();
+                self.state.borrow_mut().error = Some(error.clone());
+                *self.completed.borrow_mut() = Some((running.key.clone(), Err(error)));
+                job.take();
+            }
         }
     }
     fn call<T: DeserializeOwned>(&self, operation: Operation) -> Result<T, String> {
+        if self.job.borrow().is_some() {
+            return Err("Plugin background work is running; use polling".into());
+        }
         let mut state = self.state.borrow_mut();
         let result = state
             .worker
@@ -243,6 +343,76 @@ impl ProcessPlugin {
     }
 }
 impl Plugin for ProcessPlugin {
+    fn poll_background(
+        &self,
+        workspace: &Workspace,
+        permissions: &BTreeSet<Permission>,
+        request: &BackgroundRequest,
+    ) -> Poll<Result<BackgroundResponse, String>> {
+        if let Err(error) = self.manifest.compatible().and_then(|_| {
+            if self.store.is_trusted(self.id()) && self.installation_present() {
+                Ok(())
+            } else {
+                Err(format!("Plugin {} is untrusted or missing", self.id()))
+            }
+        }) {
+            self.stop();
+            return Poll::Ready(Err(error));
+        }
+        self.collect_job();
+        let key = (
+            Context::new(workspace, self.id(), permissions),
+            request.clone(),
+        );
+        if let Some((completed_key, result)) = self.completed.borrow_mut().take() {
+            if completed_key == key {
+                return Poll::Ready(result);
+            }
+        }
+        if self.job.borrow().is_some() {
+            return Poll::Pending;
+        }
+        if let Some(error) = &self.state.borrow().error {
+            return Poll::Ready(Err(error.clone()));
+        }
+        let mut plugin = Self::new(self.store.clone(), self.manifest.clone());
+        *plugin.state.borrow_mut() = std::mem::take(&mut *self.state.borrow_mut());
+        let control = Arc::new(Mutex::new(Cancellation::default()));
+        // Reused workers must be cancellable while owned by the background thread.
+        if let Some(worker) = &mut plugin.state.borrow_mut().worker {
+            if let Some(old) = &worker.control {
+                old.lock().unwrap_or_else(|e| e.into_inner()).pid = None;
+            }
+            control.lock().unwrap_or_else(|e| e.into_inner()).pid = Some(worker.child.id());
+            worker.control = Some(control.clone());
+        }
+        plugin.control = Some(control.clone());
+        let workspace = workspace.clone();
+        let permissions = permissions.clone();
+        let operation = request.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let spawn = std::thread::Builder::new()
+            .name(format!("tw-{}", self.id()))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    super::background_run(&plugin, &workspace, &permissions, &operation)
+                }))
+                .unwrap_or_else(|_| Err("Plugin background task panicked".into()));
+                let state = std::mem::take(&mut *plugin.state.borrow_mut());
+                let _ = sender.send((state, result));
+            });
+        if let Err(error) = spawn {
+            return Poll::Ready(Err(format!("Cannot start background task: {error}")));
+        }
+        *self.job.borrow_mut() = Some(Job {
+            key,
+            control,
+            receiver,
+            armed: true,
+        });
+        Poll::Pending
+    }
+
     fn id(&self) -> &str {
         &self.manifest.plugin.id
     }
@@ -266,6 +436,10 @@ impl Plugin for ProcessPlugin {
         workspace: &Workspace,
         permissions: &BTreeSet<Permission>,
     ) -> Result<(), String> {
+        self.collect_job();
+        if self.job.borrow().is_some() {
+            return Err("Plugin background work is running; use polling".into());
+        }
         self.manifest.compatible()?;
         if !self.store.is_trusted(self.id()) {
             self.stop();
@@ -297,7 +471,12 @@ impl Plugin for ProcessPlugin {
         }
         self.stop();
         let result: Result<(), String> = (|| {
-            let mut worker = Worker::spawn(&self.store, &self.manifest, permissions)?;
+            let mut worker = Worker::spawn(
+                &self.store,
+                &self.manifest,
+                permissions,
+                self.control.clone(),
+            )?;
             let descriptor: super::Descriptor = worker
                 .call(Operation::Describe)
                 .map_err(|error| format!("Plugin handshake failed: {error}"))??;
@@ -315,9 +494,12 @@ impl Plugin for ProcessPlugin {
         result
     }
     fn stop(&self) {
+        self.job.borrow_mut().take();
+        self.completed.borrow_mut().take();
         *self.state.borrow_mut() = State::default();
     }
     fn runtime_status(&self) -> RuntimeStatus {
+        self.collect_job();
         let mut state = self.state.borrow_mut();
         let mut availability = if self.manifest.compatible().is_err() {
             Availability::Incompatible
@@ -349,13 +531,17 @@ impl Plugin for ProcessPlugin {
             availability,
             Availability::Missing | Availability::Untrusted | Availability::Incompatible
         ) {
+            self.job.borrow_mut().take();
+            self.completed.borrow_mut().take();
             state.worker.take();
             state.context = None;
             state.icons.clear();
         }
         RuntimeStatus {
             availability,
-            connection: if state.worker.is_some() {
+            connection: if self.job.borrow().is_some() {
+                Connection::Loading
+            } else if state.worker.is_some() {
                 Connection::Running
             } else if state.error.is_some() {
                 Connection::Failed
