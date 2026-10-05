@@ -4,7 +4,7 @@
 
 Используем SemVer `MAJOR.MINOR.PATCH`. До 1.0 новые возможности и несовместимые изменения приложения увеличивают MINOR, исправления — PATCH. Это локальное решение выпуска; Plugin API (сейчас 0.6), plugin protocol, package manifest и Workspace config имеют отдельные версии. Версия Catalog принадлежит самому custom plugin.
 
-Сборки PR/main/manual версии 0.2.0 получают идентификатор `0.2.0+dev.<12 символов commit>`. Например, архив `terminal-workspace-0.2.0+dev.abcdef012345-aarch64-apple-darwin.tar.gz`. Commit у PR — проверяемый merge commit GitHub. После push тега `v0.2.0` CI создаёт архив `terminal-workspace-0.2.0-aarch64-apple-darwin.tar.gz`; tag обязан совпадать с Cargo version, иначе CI завершается ошибкой до сборки. Prerelease вроде `0.2.0-rc.1` поддерживается тегом `v0.2.0-rc.1`.
+Сборки PR/main/manual версии 0.2.1 получают идентификатор `0.2.1+dev.<12 символов commit>`. Например, архив `terminal-workspace-0.2.1+dev.abcdef012345-aarch64-apple-darwin.tar.gz`. Commit у PR — проверяемый merge commit GitHub. После push тега `v0.2.1` CI создаёт архив `terminal-workspace-0.2.1-aarch64-apple-darwin.tar.gz`; tag обязан совпадать с Cargo version, иначе CI завершается ошибкой до сборки. Prerelease вроде `0.2.1-rc.1` поддерживается тегом `v0.2.1-rc.1`.
 
 В архиве `VERSION` содержит версию приложения, `BUILD_VERSION` — идентификатор сборки, `COMMIT` — полный hash, `TARGET` — платформу. Packaging проверяет, что версия release-бинарника совпадает с Cargo.toml. Установленная команда `tw --version` показывает версию приложения; идентификатор конкретной сборки хранится в архиве. Теговая сборка проходит ту же матрицу установки и PTY, что PR. CI загружает Actions artifacts на 30 дней. После успешной теговой сборки отдельный release job автоматически публикует GitHub Release с теми же архивами и checksums. Создание версии, merge и push тега по-прежнему требуют явного решения о выпуске; PR/main/manual builds не публикуют releases.
 
@@ -15,8 +15,8 @@
 3. По запросу выпуска создать annotated tag и отправить его, например:
 
    ```sh
-   git tag -a v0.2.0 -m "Terminal Workspace 0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.2.1 -m "Terminal Workspace 0.2.1"
+   git push origin v0.2.1
    ```
 
 4. После push тега Actions выполняет четыре платформенные сборки, установку и PTY-проверки. Только после их успеха release job скачивает artifacts текущего run, проверяет полный комплект из восьми файлов, SHA-256, COMMIT/TARGET/VERSION/BUILD_VERSION и соответствие remote tag проверяемому commit. Заметки берутся из единственной непустой секции `## <version> — <date>` в CHANGELOG.md. Затем job создаёт draft, загружает файлы, скачивает их обратно и сравнивает байты перед публикацией. Prerelease-теги получают признак prerelease; выбор latest остаётся стандартным поведением GitHub. Ожидать CI вручную и переносить файлы не требуется.
