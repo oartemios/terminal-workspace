@@ -6,9 +6,9 @@
 
 ## Установка готовой сборки
 
-Для выпущенных версий скачай `.tar.gz` и соответствующий `.sha256` в [GitHub Releases](https://github.com/oartemios/terminal-workspace/releases). Для первого релиза версия архива — `0.1.0`; установка ниже одинакова для Release и Actions.
+Для выпущенных версий скачай `.tar.gz` и соответствующий `.sha256` в [GitHub Releases](https://github.com/oartemios/terminal-workspace/releases). Для релиза 0.2.0 версия архива — `0.2.0`; установка ниже одинакова для Release и Actions.
 
-Открой [GitHub Actions → Build and test](https://github.com/oartemios/terminal-workspace/actions/workflows/build.yml), выбери успешный запуск для нужного commit и скачай соответствующий artifact. Имя содержит версию и платформу: `terminal-workspace-<build-version>-<target>`. Для скачивания через веб-интерфейс нужно войти в GitHub. Внешний ZIP содержит `.tar.gz` и файл SHA-256; артефакты хранятся 30 дней. PR/main используют `0.1.0+dev.<commit>`, тег `v0.1.0` — `0.1.0`. Правила версий и выпуска: [versioning](docs/versioning.md), изменения: [changelog](CHANGELOG.md).
+Открой [GitHub Actions → Build and test](https://github.com/oartemios/terminal-workspace/actions/workflows/build.yml), выбери успешный запуск для нужного commit и скачай соответствующий artifact. Имя содержит версию и платформу: `terminal-workspace-<build-version>-<target>`. Для скачивания через веб-интерфейс нужно войти в GitHub. Внешний ZIP содержит `.tar.gz` и файл SHA-256; артефакты хранятся 30 дней. PR/main используют `0.2.0+dev.<commit>`, тег `v0.2.0` — `0.2.0`. Правила версий и выпуска: [versioning](docs/versioning.md), изменения: [changelog](CHANGELOG.md).
 
 | Компьютер | Artifact |
 | --- | --- |
@@ -22,7 +22,7 @@
 После распаковки скачанного ZIP в терминале выполни (пример для Apple Silicon):
 
 ```sh
-build_version='0.1.0+dev.abcdef012345' # замени на версию скачанной сборки
+build_version='0.2.0' # замени на версию скачанной сборки
 archive="terminal-workspace-$build_version-aarch64-apple-darwin"
 shasum -a 256 -c "$archive.tar.gz.sha256"
 tar -xzf "$archive.tar.gz"
