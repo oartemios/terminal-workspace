@@ -71,7 +71,7 @@ impl Manifest {
             || self.protocol_version != PROTOCOL_VERSION
             || !matches!(
                 self.api_version.as_str(),
-                "0.4" | "0.5" | PLUGIN_API_VERSION
+                "0.4" | "0.5" | "0.6" | PLUGIN_API_VERSION
             )
         {
             return Err(format!(

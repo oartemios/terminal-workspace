@@ -14,7 +14,7 @@ pub use config::CONFIG_FILE;
 use serde_json::{json, Value};
 
 /// Draft source-level Plugin API; no dynamic ABI or isolation is implied.
-pub const PLUGIN_API_VERSION: &str = "0.6";
+pub const PLUGIN_API_VERSION: &str = "0.7";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyBinding {
@@ -99,6 +99,8 @@ pub enum CommandOutcome {
     WorkspaceChanged,
     /// Core-owned navigation of the current output, independent of plugin Items.
     View(ViewRequest),
+    /// Core-only signal routed to the active view's refresh lifecycle.
+    Refresh,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -108,6 +110,17 @@ pub struct GroupView {
     pub items: Vec<Item>,
     pub parent: Option<CommandInvocation>,
     pub command_defaults: Vec<CommandInvocation>,
+}
+
+/// Host refresh scheduling hint. Cached domain data remains owned by the plugin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RefreshStrategy {
+    #[default]
+    Manual,
+    OnFocus,
+    Interval {
+        seconds: u64,
+    },
 }
 
 #[derive(
@@ -262,6 +275,18 @@ pub trait Plugin {
         Vec::new()
     }
     fn groups(&self) -> Vec<Group>;
+    fn refresh_strategy(&self, _group: &str) -> RefreshStrategy {
+        RefreshStrategy::Manual
+    }
+    /// Update plugin-owned state when needed and return the resulting GroupView.
+    fn refresh(
+        &self,
+        workspace: &Workspace,
+        group: &str,
+        location: Option<&str>,
+    ) -> Result<GroupView, String> {
+        self.view(workspace, group, location)
+    }
     fn items(&self, workspace: &Workspace, group: &str) -> Result<Vec<Item>, String>;
     fn view(
         &self,
@@ -836,6 +861,9 @@ impl App {
                         (Response::View(view), Request::View { .. }) => {
                             self.validate_view(id, view)?
                         }
+                        (Response::Refreshed(view), Request::Refresh { .. }) => {
+                            self.validate_view(id, view)?
+                        }
                         (Response::Actions { view, actions }, Request::Actions { .. }) => {
                             self.validate_view(id, view)?;
                             self.validate_actions(id, actions)?;
@@ -856,6 +884,15 @@ impl App {
         let plugin = self.active(id)?;
         catch_unwind(AssertUnwindSafe(|| plugin.groups()))
             .map_err(|_| format!("Plugin {id} failed while listing groups"))
+    }
+
+    pub fn refresh_strategy(&self, id: &str, group: &str) -> RefreshStrategy {
+        self.active(id)
+            .ok()
+            .and_then(|plugin| {
+                catch_unwind(AssertUnwindSafe(|| plugin.refresh_strategy(group))).ok()
+            })
+            .unwrap_or_default()
     }
 
     pub fn items(&self, id: &str, group: &str) -> Result<Vec<Item>, String> {
@@ -1087,14 +1124,9 @@ impl App {
     fn validate_outcome(outcome: &CommandOutcome) -> Result<(), String> {
         if matches!(
             outcome,
-            CommandOutcome::WorkspaceChanged | CommandOutcome::View(_)
+            CommandOutcome::WorkspaceChanged | CommandOutcome::View(_) | CommandOutcome::Refresh
         ) {
-            return Err(if matches!(outcome, CommandOutcome::View(_)) {
-                "View outcomes are reserved for Core"
-            } else {
-                "WorkspaceChanged is reserved for Core"
-            }
-            .into());
+            return Err("Core-only command outcome returned by plugin".into());
         }
         Ok(())
     }
@@ -1126,6 +1158,12 @@ impl App {
                 _ => return Err("Unknown view command".into()),
             };
             return Ok(CommandOutcome::View(request));
+        }
+        if invocation.id == "core.refresh" {
+            if !invocation.args.is_empty() {
+                return Err("core.refresh takes no arguments".into());
+            }
+            return Ok(CommandOutcome::Refresh);
         }
         let content = match invocation.id.as_str() {
             "core.plugin.install" => {
@@ -1304,6 +1342,7 @@ impl App {
 
 fn core_commands() -> Vec<Command> {
     [
+        ("core.refresh", "Refresh current plugin group"),
         ("core.view.find", "Find text in viewed output"),
         ("core.view.goto", "Go to source line in viewed output"),
         ("core.view.next", "Next matching line in viewed output"),

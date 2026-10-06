@@ -94,6 +94,7 @@ impl Fixture {
                 .collect(),
                 keybindings: Vec::new(),
                 permissions,
+                refresh: Vec::new(),
             },
         };
         std::fs::write(
@@ -534,6 +535,34 @@ fn old_api_packages_and_text_blocks_remain_compatible() {
     assert_eq!(block.format, terminal_workspace::ContentFormat::Text);
 }
 
+#[test]
+fn executable_refresh_coalesces_requests_and_keeps_offline_errors_local() {
+    use terminal_workspace::runtime::{BackgroundRequest, BackgroundResponse};
+    let fixture = Fixture::new();
+    let mut app = gated_probe(&fixture, "refresh");
+    let request = BackgroundRequest::Refresh {
+        group: "entries".into(),
+        location: None,
+    };
+    assert!(app.poll_background("probe", &request).is_pending());
+    let _pid = wait_marker(&fixture, "refresh");
+    assert!(app.poll_background("probe", &request).is_pending());
+    release(&fixture, "refresh");
+    assert!(matches!(
+        wait_background(&app, &request).unwrap(),
+        BackgroundResponse::Refreshed(_)
+    ));
+
+    let offline = BackgroundRequest::Refresh {
+        group: "error".into(),
+        location: None,
+    };
+    assert!(wait_background(&app, &offline)
+        .unwrap_err()
+        .contains("Expected offline refresh error"));
+    assert_eq!(files(&mut app), "first file");
+}
+
 fn gated_probe(fixture: &Fixture, gate: &str) -> App {
     let source = fixture.probe(vec![Permission::Process]);
     let mut manifest = Manifest::read(&source).unwrap();
@@ -614,7 +643,7 @@ fn background_startup_view_actions_and_commands_leave_local_work_responsive() {
     use terminal_workspace::runtime::{
         BackgroundRequest as Request, BackgroundResponse as Response,
     };
-    for gate in ["describe", "view", "actions", "execute"] {
+    for gate in ["describe", "view", "refresh", "actions", "execute"] {
         let fixture = Fixture::new();
         let mut app = gated_probe(&fixture, gate);
         let request = match gate {
@@ -622,6 +651,10 @@ fn background_startup_view_actions_and_commands_leave_local_work_responsive() {
                 group: "entries".into(),
                 location: None,
                 item: "probe.item".into(),
+            },
+            "refresh" => Request::Refresh {
+                group: "entries".into(),
+                location: None,
             },
             "execute" => Request::Execute(CommandInvocation {
                 id: "probe.info".into(),
@@ -649,7 +682,8 @@ fn background_startup_view_actions_and_commands_leave_local_work_responsive() {
         );
         assert!(
             start.elapsed() < std::time::Duration::from_millis(500),
-            "local work blocked by gated plugin"
+            "local work blocked by gated {gate}: {:?}",
+            start.elapsed()
         );
         release(&fixture, gate);
         let result = wait_background(&app, &request);
@@ -663,6 +697,8 @@ fn background_startup_view_actions_and_commands_leave_local_work_responsive() {
                 serde_json::from_str::<Value>(&block.content).unwrap()["pid"],
                 pid
             );
+        } else if gate == "refresh" {
+            assert!(matches!(result.unwrap(), Response::Refreshed(_)));
         } else {
             assert!(matches!(result.unwrap(), Response::View(_)));
         }
@@ -687,7 +723,7 @@ fn background_startup_view_actions_and_commands_leave_local_work_responsive() {
 #[test]
 fn cancelling_gated_startup_and_view_covers_all_lifecycle_boundaries() {
     use terminal_workspace::runtime::BackgroundRequest;
-    for gate in ["describe", "view"] {
+    for gate in ["describe", "view", "refresh"] {
         for boundary in [
             "suspend",
             "disable",
@@ -699,9 +735,16 @@ fn cancelling_gated_startup_and_view_covers_all_lifecycle_boundaries() {
         ] {
             let fixture = Fixture::new();
             let mut app = gated_probe(&fixture, gate);
-            let request = BackgroundRequest::View {
-                group: "entries".into(),
-                location: None,
+            let request = if gate == "refresh" {
+                BackgroundRequest::Refresh {
+                    group: "entries".into(),
+                    location: None,
+                }
+            } else {
+                BackgroundRequest::View {
+                    group: "entries".into(),
+                    location: None,
+                }
             };
             assert!(app.poll_background("probe", &request).is_pending());
             let pid = wait_marker(&fixture, gate);

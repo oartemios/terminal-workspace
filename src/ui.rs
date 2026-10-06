@@ -12,6 +12,9 @@ use std::task::Poll;
 
 #[derive(Clone)]
 enum WorkKind {
+    Load {
+        selected: Option<String>,
+    },
     Refresh {
         selected: Option<String>,
     },
@@ -163,6 +166,9 @@ pub struct Ui {
     bindings: Vec<KeyBinding>,
     binding_errors: Vec<String>,
     message: String,
+    stale: bool,
+    has_cached_view: bool,
+    next_refresh: Option<std::time::Instant>,
     page_size: usize,
     list_page_size: usize,
     output_item: Option<String>,
@@ -213,6 +219,9 @@ impl Ui {
             bindings: Vec::new(),
             binding_errors: Vec::new(),
             message: String::new(),
+            stale: false,
+            has_cached_view: false,
+            next_refresh: None,
             page_size: 18,
             list_page_size: 18,
             output_item: None,
@@ -572,6 +581,9 @@ impl Ui {
         self.command_defaults.clear();
         self.selected = 0;
         self.message.clear();
+        self.stale = false;
+        self.has_cached_view = false;
+        self.next_refresh = None;
         if let Some(id) = self.plugin_id() {
             match self.app.groups(id) {
                 Ok(groups) => self.groups = groups,
@@ -591,8 +603,39 @@ impl Ui {
                     group: group.to_owned(),
                     location: self.location.clone(),
                 },
+                WorkKind::Load { selected },
+            );
+        }
+    }
+
+    fn refresh_now(&mut self) {
+        let selected = self.selected_item();
+        if let (Some(plugin), Some(group)) = (
+            self.plugin_id().map(str::to_owned),
+            self.group_id().map(str::to_owned),
+        ) {
+            self.stale = self.has_cached_view;
+            self.submit_work(
+                plugin,
+                BackgroundRequest::Refresh {
+                    group,
+                    location: self.location.clone(),
+                },
                 WorkKind::Refresh { selected },
             );
+        }
+    }
+
+    fn schedule_refresh(&mut self, plugin: &str, group: &str) {
+        match self.app.refresh_strategy(plugin, group) {
+            crate::RefreshStrategy::Manual => self.next_refresh = None,
+            crate::RefreshStrategy::OnFocus => self.refresh_now(),
+            crate::RefreshStrategy::Interval { seconds } => {
+                self.next_refresh = Some(
+                    std::time::Instant::now() + std::time::Duration::from_secs(seconds.max(1)),
+                );
+                self.refresh_now();
+            }
         }
     }
 
@@ -618,6 +661,13 @@ impl Ui {
 
     /// Poll bounded host work without waiting for plugin pipes or a handshake.
     pub fn tick(&mut self) -> bool {
+        if self.work.is_none()
+            && self
+                .next_refresh
+                .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.refresh_now();
+        }
         let Some(work) = self.work.take() else {
             return false;
         };
@@ -637,17 +687,46 @@ impl Ui {
                 false
             }
             Poll::Ready(Err(error)) => {
-                self.message = error;
-                if !matches!(work.kind, WorkKind::Refresh { .. }) {
+                if matches!(work.kind, WorkKind::Refresh { .. }) {
+                    self.stale = self.has_cached_view;
+                    self.message = if self.has_cached_view {
+                        format!("Refresh failed; cached data is stale: {error}")
+                    } else {
+                        format!("Refresh failed; data unavailable: {error}")
+                    };
+                } else if matches!(work.kind, WorkKind::Load { .. }) && !self.has_cached_view {
+                    self.message = format!("Data unavailable: {error}");
+                } else {
+                    self.message = error;
+                }
+                if !matches!(work.kind, WorkKind::Refresh { .. } | WorkKind::Load { .. }) {
                     self.cancel_command();
                 }
                 true
             }
             Poll::Ready(Ok(response)) => {
                 match (work.kind, response) {
-                    (WorkKind::Refresh { selected }, BackgroundResponse::View(view)) => {
+                    (WorkKind::Load { selected }, BackgroundResponse::View(view)) => {
                         self.apply_view(view, selected);
                         self.message.clear();
+                        self.stale = false;
+                        let group = self.group_id().unwrap_or_default().to_owned();
+                        self.schedule_refresh(&work.owner, &group);
+                    }
+                    (WorkKind::Refresh { selected }, BackgroundResponse::Refreshed(view)) => {
+                        self.apply_view(view, selected);
+                        self.message.clear();
+                        self.stale = false;
+                        if let (Some(plugin), Some(group)) = (self.plugin_id(), self.group_id()) {
+                            if let crate::RefreshStrategy::Interval { seconds } =
+                                self.app.refresh_strategy(plugin, group)
+                            {
+                                self.next_refresh = Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_secs(seconds.max(1)),
+                                );
+                            }
+                        }
                     }
                     (
                         WorkKind::Navigate {
@@ -655,10 +734,17 @@ impl Ui {
                             remember,
                         },
                         BackgroundResponse::View(view),
-                    ) => match self.finish_location(&work.owner, navigation, remember, view) {
-                        Ok(()) => self.message.clear(),
-                        Err(error) => self.message = error,
-                    },
+                    ) => {
+                        let group = navigation.group.clone();
+                        match self.finish_location(&work.owner, navigation, remember, view) {
+                            Ok(()) => {
+                                self.message.clear();
+                                self.stale = false;
+                                self.schedule_refresh(&work.owner, &group);
+                            }
+                            Err(error) => self.message = error,
+                        }
+                    }
                     (
                         WorkKind::Actions { activate, item },
                         BackgroundResponse::Actions {
@@ -704,6 +790,7 @@ impl Ui {
             })
             .collect();
         self.items = view.items;
+        self.has_cached_view = true;
         self.location = Some(view.location);
         self.view_title = view.title;
         self.parent = view.parent;
@@ -948,6 +1035,7 @@ impl Ui {
                 id.as_str(),
                 "core.plugins"
                     | "core.plugins.discover"
+                    | "core.refresh"
                     | "core.plugin.install"
                     | "core.workspace.open"
                     | "core.workspace.previous"
@@ -1134,6 +1222,11 @@ impl Ui {
                 self.mode = Mode::Output { block, offset: 0 };
             }
             Ok(CommandOutcome::View(request)) => self.apply_view_request(request),
+            Ok(CommandOutcome::Refresh) => {
+                self.input_return = None;
+                self.mode = Mode::Normal;
+                self.refresh_now();
+            }
             Ok(CommandOutcome::Navigate(navigation)) => {
                 self.input_return = None;
                 self.mode = Mode::Normal;
@@ -1307,7 +1400,7 @@ impl Ui {
                     Key::Char('?') => self.mode = Mode::Help { offset: 0 },
                     Key::Char('a') => self.show_actions(),
                     Key::Char('r') => {
-                        self.load_groups_preserving_selection();
+                        self.execute(self.invocation("core.refresh".into(), None));
                     }
                     Key::Char('s') => {
                         self.sort = match self.sort {
@@ -1587,14 +1680,6 @@ impl Ui {
         true
     }
 
-    fn load_groups_preserving_selection(&mut self) {
-        if self.groups.is_empty() {
-            self.load_groups();
-        } else {
-            self.refresh();
-        }
-    }
-
     /// Produces a bounded frame with terminal controls only from the renderer.
     pub fn render(&self, width: usize, height: usize) -> String {
         if width == 0 || height == 0 {
@@ -1721,15 +1806,20 @@ impl Ui {
                 }
                 _ if !self.pending.is_empty() => self.pending_hint(),
                 _ if !self.message.is_empty() => format!("Error: {}", self.message),
+                _ if self.work.is_some() && self.stale => format!(
+                    "Refreshing cached data: {} (navigation remains available)",
+                    self.work.as_ref().unwrap().owner
+                ),
                 _ if self.work.is_some() => format!(
                     "Loading: {} (navigation remains available)",
                     self.work.as_ref().unwrap().owner
                 ),
+                _ if self.stale => "Showing stale cached data".into(),
                 _ if !self.binding_errors.is_empty() => {
                     format!("Bindings: {} (? for details)", self.binding_errors[0])
                 }
                 _ => format!(
-                    "{:?} | {} | filter: {}",
+                    "Fresh | {:?} | {} | filter: {}",
                     self.focus,
                     self.selected_item().unwrap_or_default(),
                     self.filter
@@ -2078,15 +2168,20 @@ impl Ui {
             }
             _ if !self.pending.is_empty() => self.pending_hint(),
             _ if !self.message.is_empty() => format!("Error: {}", self.message),
+            _ if self.work.is_some() && self.stale => format!(
+                "Refreshing cached data: {} (navigation remains available)",
+                self.work.as_ref().unwrap().owner
+            ),
             _ if self.work.is_some() => format!(
                 "Loading: {} (navigation remains available)",
                 self.work.as_ref().unwrap().owner
             ),
+            _ if self.stale => "Showing stale cached data".into(),
             _ if !self.binding_errors.is_empty() => {
                 format!("Bindings: {} (? for details)", self.binding_errors[0])
             }
             _ => format!(
-                "{:?} | {} | filter: {}",
+                "Fresh | {:?} | {} | filter: {}",
                 self.focus,
                 self.selected_item().unwrap_or_default(),
                 self.filter

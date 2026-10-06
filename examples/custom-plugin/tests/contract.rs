@@ -4,7 +4,7 @@ use tw_example_catalog::CatalogPlugin;
 
 #[test]
 fn same_custom_plugin_uses_two_workspace_contexts() {
-    assert_eq!(PLUGIN_API_VERSION, "0.6");
+    assert_eq!(PLUGIN_API_VERSION, "0.7");
     for root in [std::env::current_dir().unwrap(), std::env::temp_dir()] {
         let mut app = App::new(root).unwrap();
         app.install(Box::new(CatalogPlugin), true).unwrap();
@@ -232,6 +232,8 @@ fn independently_built_package_installs_and_runs_through_the_keyboard_ui() {
     assert!(frame(&ui).contains("untrusted"));
     command(&mut ui, "core.plugin.trust catalog");
     handle(&mut ui, Key::Escape);
+    assert!(frame(&ui).contains("Introduction section"));
+    command(&mut ui, "core.refresh");
     assert!(frame(&ui).contains("Introduction section"));
     text(&mut ui, "l");
     for route in 0..4 {
