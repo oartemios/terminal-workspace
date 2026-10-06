@@ -91,6 +91,22 @@ fn dispatch(
                 .collect();
             serde_json::to_value(ViewReply { view, icons }).map_err(|e| e.to_string())
         }
+        Operation::Refresh {
+            context,
+            group,
+            location,
+        } => {
+            authorize(&context, descriptor)?;
+            let workspace = context.workspace(plugin.id())?;
+            plugin.start(&workspace, &context.permissions)?;
+            let view = plugin.refresh(&workspace, &group, location.as_deref())?;
+            let icons = view
+                .items
+                .iter()
+                .map(|item| (item.id.clone(), plugin.item_icon(item)))
+                .collect();
+            serde_json::to_value(ViewReply { view, icons }).map_err(|e| e.to_string())
+        }
         Operation::Actions { context, item } => {
             authorize(&context, descriptor)?;
             plugin.start(&context.workspace(plugin.id())?, &context.permissions)?;

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Plugin API 0.7 adds plugin-owned cache refresh strategies (`Manual`, `OnFocus`, `Interval`), executable refresh operations, shared `core.refresh`, and visible fresh/stale/unavailable states.
+
 ## 0.2.1 — 2026-10-05
 
 - GitHub Release автоматически публикуется после успешных теговых сборок всех четырёх платформ: проверка архивов, заметки из CHANGELOG и восстановление незавершённого draft.

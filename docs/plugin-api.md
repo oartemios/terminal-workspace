@@ -1,6 +1,6 @@
-# Plugin API v0.6 — draft
+# Plugin API v0.7 — draft
 
-`PLUGIN_API_VERSION = "0.6"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
+`PLUGIN_API_VERSION = "0.7"` обозначает исходный Rust-контракт. Files и независимо упакованный Catalog используют публичный SDK; production TUI загружает оба через одинаковый процессный runtime. Стабильного Rust ABI нет. Для внешних executable packages отдельно версионируются package format 1 и [JSON-lines protocol 1](plugin-protocol.md).
 
 ## Данные и вызовы
 
@@ -43,6 +43,7 @@ Host очищает environment; передаёт только manifest allowlis
 Все выполняются через CommandRegistry:
 
 - `core.plugins`, `core.plugins.discover` — статус и повторный discovery.
+- `core.refresh` — обновить активную Group через общий CommandRegistry; клавиша `r` вызывает эту же команду.
 - `core.plugin.install <package-dir>`, `uninstall <id>` — установка и отдельное удаление; настройки проекта сохраняются.
 - `core.plugin.trust/untrust/restart <id>` — trust и повторный запуск.
 - `core.plugin.enable/disable/suspend <id>` — Workspace/session activation.
@@ -56,7 +57,7 @@ Host очищает environment; передаёт только manifest allowlis
 
 Defaults остаются изменяемыми: Files — локальный `p` для preview; Catalog — `p` для Read note только в Introduction. Открытие и parent используют общую грамматику `h/j/k/l`, Enter и Backspace. [Итерация 2.1](decisions/0005-keyboard-defaults.md) описывает раскладку; ранее удалённые aliases можно вернуть overrides.
 
-Изменения относительно 0.3: сериализуемые DTO, дополнительные permissions, lifecycle/status hooks, borrowed id/name, процессный SDK и фактическая установка пакета без пересборки host. Внешний контракт остаётся draft; events и refresh strategies появятся отдельно.
+Изменения относительно 0.3: сериализуемые DTO, дополнительные permissions, lifecycle/status hooks, borrowed id/name, процессный SDK и фактическая установка пакета без пересборки host. Внешний контракт остаётся draft; event subscriptions требуют отдельного event bus.
 
 API 0.5 добавляет ContentFormat и Core-only ViewRequest. Rust Block literals должны явно задавать format. Новый host принимает manifests API 0.4 и 0.5; в старых JSON Blocks отсутствие format означает Text. Package/protocol остаются version 1. `core.view.find/goto/next/previous/source` управляют открытым output, не требуют Item и не вызывают plugin. `/`, `g`, `n/N`, `v`, `:120` и адресуемые команды сходятся к этому маршруту.
 
@@ -74,4 +75,12 @@ Executable adapter сохраняет живой worker между операц�
 
 `Connection::Loading` отличает выполняемую фоновую операцию от Running/Disconnected/Failed. TUI показывает Loading в statusline, сохраняет клавиатурную навигацию и опрашивает completion через `Ui::tick`. Отмена UI-перехода скрывает его поздний результат; она не обещает rollback уже выполняющейся команды. Lifecycle cancellation завершает процесс, но также не откатывает совершённые им внешние действия.
 
-Wire operations, package format и protocol остаются version 1; host 0.6 принимает manifests API 0.4, 0.5 и 0.6. Кэш, refresh strategies и event subscriptions здесь не добавлены. [Решение фонового runtime](decisions/0010-background-plugin-runtime.md) описывает границы и проверку.
+## API 0.7: cache и refresh
+
+`Plugin::refresh_strategy(group)` задаёт `Manual` (default), `OnFocus` или `Interval { seconds }`. Стратегия попадает в descriptor executable package; event-driven режим не входит в этот контракт и зависит от #9.
+
+`Plugin::view` возвращает текущий plugin-owned state и должен быстро отдавать кэш, если он есть. Core запрашивает этот view перед on-focus/interval refresh, так что рабочая область остаётся доступной во время сети. `Plugin::refresh(workspace, group, location)` обновляет принадлежащий плагину кэш и возвращает актуальный GroupView; его default повторно вызывает `view` для простых/локальных плагинов. Ошибка refresh оставляет последний GroupView на экране с пометкой stale. Плагины без кэша могут вернуть ошибку; UI сообщает её явно.
+
+Ручное обновление вызывает `core.refresh` через CommandRegistry (включая клавишу `r`). Executable package получает новый `refresh` operation поверх protocol 1; старые API 0.4–0.6 manifests остаются допустимыми и используют default Manual. Suspend, disable, permission changes, Workspace switch и UI context epoch отменяют текущую работу; late completion не применяется. Selection сохраняется по стабильному Item ID.
+
+Cache persistence остаётся ответственностью плагина: API не требует disk persistence и допускает session-only cache. Core не интерпретирует данные кэша. Общие UI состояния сейчас отражают refreshing, stale после ошибки и недоступность по ошибке; отдельная freshness timestamp/state schema не вводится.

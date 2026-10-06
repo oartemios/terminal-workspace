@@ -425,6 +425,15 @@ impl Plugin for ProcessPlugin {
     fn groups(&self) -> Vec<Group> {
         self.manifest.plugin.groups.clone()
     }
+    fn refresh_strategy(&self, group: &str) -> crate::RefreshStrategy {
+        self.manifest
+            .plugin
+            .refresh
+            .iter()
+            .find(|(id, _)| id == group)
+            .map(|(_, strategy)| *strategy)
+            .unwrap_or_default()
+    }
     fn commands(&self) -> Vec<Command> {
         self.manifest.plugin.commands.clone()
     }
@@ -576,6 +585,32 @@ impl Plugin for ProcessPlugin {
             group: group.into(),
             location: location.map(str::to_owned),
         })?;
+        self.state.borrow_mut().icons = reply.icons;
+        Ok(reply.view)
+    }
+    fn refresh(
+        &self,
+        _workspace: &Workspace,
+        group: &str,
+        location: Option<&str>,
+    ) -> Result<GroupView, String> {
+        let context = self.context()?;
+        let location = location.map(str::to_owned);
+        let operation = if self.manifest.api_version == crate::PLUGIN_API_VERSION {
+            Operation::Refresh {
+                context,
+                group: group.into(),
+                location,
+            }
+        } else {
+            // Older workers have no refresh operation; their view call is their refresh.
+            Operation::View {
+                context,
+                group: group.into(),
+                location,
+            }
+        };
+        let reply: ViewReply = self.call(operation)?;
         self.state.borrow_mut().icons = reply.icons;
         Ok(reply.view)
     }

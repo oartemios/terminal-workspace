@@ -1,6 +1,6 @@
 # Executable plugin protocol v1
 
-Package format 1 и source Plugin API 0.6. Реализация: `src/runtime/`; ограничения/trust/enforcement описаны в [решении runtime](decisions/0006-executable-plugin-runtime.md).
+Package format 1 и source Plugin API 0.7. Реализация: `src/runtime/`; ограничения/trust/enforcement описаны в [решении runtime](decisions/0006-executable-plugin-runtime.md).
 
 ## Пакет
 
@@ -10,7 +10,7 @@ Package format 1 и source Plugin API 0.6. Реализация: `src/runtime/`;
 {
   "package_version": 1,
   "protocol_version": 1,
-  "api_version": "0.6",
+  "api_version": "0.7",
   "executable": "plugin",
   "args": [],
   "environment": [],
@@ -21,7 +21,8 @@ Package format 1 и source Plugin API 0.6. Реализация: `src/runtime/`;
     "groups": [{"id": "sections", "title": "Sections"}],
     "commands": [{"id": "catalog.read", "title": "Read note", "requires_item": true}],
     "permissions": [],
-    "keybindings": []
+    "keybindings": [],
+    "refresh": [["sections", "OnFocus"]]
   }
 }
 ```
@@ -78,6 +79,8 @@ Messages ограничены 1 MiB. Startup describe: deadline 5 s, обычн�
 
 Items сохраняют нативный смысл `kind`; id уникальны в view. Parent и command defaults принадлежат registered commands данного plugin. Icons — optional entries в обязательном объекте `icons`; небезопасный/неодноклеточный символ заменяется Core на fallback.
 
+`refresh` принимает тот же context/group/location, вызывает `Plugin::refresh` и возвращает тот же `ViewReply`, включая icons. Плагины со стратегией refresh должны быстро отдавать plugin-owned cache из `view`, не ждать сеть. Ошибка refresh оставляет ранее показанный view в UI со stale-индикатором.
+
 `actions` получает `context` и `item` с теми же полями id/title/kind. Успех — массив:
 
 ```json
@@ -116,4 +119,4 @@ Host polling для ProcessPlugin запускает worker и handshake вне 
 
 API 0.5: Output Block может содержать `"format":"Text"` или `"format":"Markdown"`; отсутствие поля в API 0.4 ответах означает Text. Content содержит исходный текст без ANSI. Host 0.5 принимает manifests 0.4 и 0.5. Плагины не возвращают Core-only `View` outcomes; это механизм маршрутизации команд viewer внутри host.
 
-API 0.6: неблокирующий host scheduling использует те же describe/view/actions/execute messages и deadlines; wire protocol остаётся 1. Host принимает API 0.4/0.5/0.6. Один executable worker обслуживает последовательные requests; completion и cancellation реализованы host, unsolicited replies или native threads в plugin не требуются. Startup/handshake и начальная view загрузка также идут в фоне. Details: [polling contract](plugin-api.md#api-06-polling-фоновой-работы), [решение 0010](decisions/0010-background-plugin-runtime.md).
+API 0.6: неблокирующий host scheduling использует те же describe/view/actions/execute messages и deadlines; wire protocol остаётся 1. API 0.7 добавляет refresh operation без изменения framing. Host принимает manifests API 0.4–0.7. Один executable worker обслуживает последовательные requests; completion и cancellation реализованы host, unsolicited replies или native threads в plugin не требуются. Startup/handshake и начальная view загрузка также идут в фоне. Details: [polling contract](plugin-api.md#api-06-polling-фоновой-работы), [решение 0010](decisions/0010-background-plugin-runtime.md).

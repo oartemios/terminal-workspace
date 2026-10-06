@@ -10,7 +10,9 @@ pub use package::{write_package, Manifest, PackageStore};
 pub use process::ProcessPlugin;
 pub use server::serve_plugin;
 
-use crate::{Command, CommandInvocation, Group, KeyBinding, Permission, Plugin, Workspace};
+use crate::{
+    Command, CommandInvocation, Group, KeyBinding, Permission, Plugin, RefreshStrategy, Workspace,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -31,17 +33,29 @@ pub struct Descriptor {
     pub keybindings: Vec<KeyBinding>,
     #[serde(default)]
     pub permissions: Vec<Permission>,
+    /// Non-manual strategies only; absent in API <= 0.6 manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refresh: Vec<(String, RefreshStrategy)>,
 }
 
 impl Descriptor {
     pub fn from_plugin(plugin: &dyn Plugin) -> Self {
+        let groups = plugin.groups();
+        let refresh = groups
+            .iter()
+            .filter_map(|group| {
+                let strategy = plugin.refresh_strategy(&group.id);
+                (strategy != RefreshStrategy::Manual).then_some((group.id.clone(), strategy))
+            })
+            .collect();
         Self {
             id: plugin.id().into(),
             name: plugin.name().into(),
-            groups: plugin.groups(),
+            groups,
             commands: plugin.commands(),
             keybindings: plugin.keybindings(),
             permissions: plugin.permissions(),
+            refresh,
         }
     }
 
@@ -63,6 +77,15 @@ impl Descriptor {
         for group in &self.groups {
             if group.id.is_empty() || !groups.insert(&group.id) {
                 return Err("Invalid or duplicate group".into());
+            }
+        }
+        let mut refresh_groups = BTreeSet::new();
+        for (group, strategy) in &self.refresh {
+            if !groups.contains(group) || !refresh_groups.insert(group) {
+                return Err("Refresh strategy refers to an unknown or duplicate group".into());
+            }
+            if matches!(strategy, RefreshStrategy::Interval { seconds: 0 }) {
+                return Err("Refresh interval must be at least one second".into());
             }
         }
         let mut commands = BTreeSet::new();
@@ -167,6 +190,11 @@ pub(crate) struct Request {
 pub(crate) enum Operation {
     Describe,
     View {
+        context: Context,
+        group: String,
+        location: Option<String>,
+    },
+    Refresh {
         context: Context,
         group: String,
         location: Option<String>,

@@ -25,6 +25,13 @@ for line in sys.stdin:
         result = {"view": {"title": "Probe", "location": "", "items": [
             {"id": "probe.item", "title": "Probe item", "kind": "probe"}],
             "parent": None, "command_defaults": []}, "icons": {"probe.item": "•"}}
+    elif op == "refresh":
+        if request["group"] == "error":
+            error = "Expected offline refresh error"
+        else:
+            result = {"view": {"title": "Probe", "location": "", "items": [
+                {"id": "probe.item", "title": "Probe item", "kind": "probe"}],
+                "parent": None, "command_defaults": []}, "icons": {"probe.item": "•"}}
     elif op == "actions":
         result = [{"label": "Foreign action", "command_id": "core.plugin.disable",
                    "invocation": {"id": "core.plugin.disable", "item": None, "args": ["files"]},

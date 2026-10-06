@@ -10,6 +10,10 @@ pub enum BackgroundRequest {
         group: String,
         location: Option<String>,
     },
+    Refresh {
+        group: String,
+        location: Option<String>,
+    },
     Actions {
         group: String,
         location: Option<String>,
@@ -21,6 +25,7 @@ pub enum BackgroundRequest {
 pub enum BackgroundResponse {
     Started,
     View(GroupView),
+    Refreshed(GroupView),
     Actions {
         view: GroupView,
         actions: Vec<Action>,
@@ -40,6 +45,9 @@ pub(crate) fn run<P: Plugin + ?Sized>(
         BackgroundRequest::View { group, location } => plugin
             .view(workspace, group, location.as_deref())
             .map(BackgroundResponse::View),
+        BackgroundRequest::Refresh { group, location } => plugin
+            .refresh(workspace, group, location.as_deref())
+            .map(BackgroundResponse::Refreshed),
         BackgroundRequest::Actions {
             group,
             location,

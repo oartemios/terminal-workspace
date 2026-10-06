@@ -1,7 +1,7 @@
 //! Independently packaged plugin using the same draft API as Files.
 use terminal_workspace::{
     Action, BindingScope, Block, Command, CommandInvocation, CommandOutcome, Group, GroupView,
-    Item, KeyBinding, Navigation, Plugin, Workspace,
+    Item, KeyBinding, Navigation, Plugin, RefreshStrategy, Workspace,
 };
 
 pub struct CatalogPlugin;
@@ -18,6 +18,13 @@ impl Plugin for CatalogPlugin {
             id: "sections".into(),
             title: "Sections".into(),
         }]
+    }
+    fn refresh_strategy(&self, group: &str) -> RefreshStrategy {
+        if group == "sections" {
+            RefreshStrategy::OnFocus
+        } else {
+            RefreshStrategy::Manual
+        }
     }
     fn items(&self, workspace: &Workspace, group: &str) -> Result<Vec<Item>, String> {
         Ok(self.view(workspace, group, None)?.items)
